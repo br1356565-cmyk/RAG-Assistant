@@ -1,0 +1,26 @@
+name: seed-demo-repos
+
+# Creates the four private demo repos (local/seed_demo_repos.sh) under the token owner's
+# account. Needs a repository secret SEED_TOKEN: a fine-grained personal access token with
+# "All repositories", Administration: Read and write, Contents: Read and write.
+# Give it a 7-day expiry and delete it afterwards; the GitHub Actions token can't create repos.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check token
+        env:
+          GH_TOKEN: ${{ secrets.SEED_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::error::Add the SEED_TOKEN secret first"; exit 1; fi
+      - run: bash local/seed_demo_repos.sh
+        env:
+          GH_TOKEN: ${{ secrets.SEED_TOKEN }}

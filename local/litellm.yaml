@@ -1,0 +1,16 @@
+# Only used with `docker compose --profile litellm up`. If you already run the LiteLLM
+# gateway, point GATEWAY_URL at it instead and add the two aliases there.
+#
+# EDIT the two model ids below to Bedrock models (or cross-region inference profile ids)
+# that are enabled in your AWS account, e.g. a Sonnet-class model for chat and a
+# Haiku-class model for batch investigations.
+model_list:
+  - model_name: audit-chat
+    litellm_params:
+      model: bedrock/REPLACE_WITH_SONNET_CLASS_MODEL_ID
+  - model_name: audit-batch
+    litellm_params:
+      model: bedrock/REPLACE_WITH_HAIKU_CLASS_MODEL_ID
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

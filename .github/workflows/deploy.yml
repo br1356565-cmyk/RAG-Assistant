@@ -1,0 +1,75 @@
+name: devops-audit-agent
+
+on:
+  pull_request:
+    paths: ["src/**", "tests/**", "web/**", "terraform/**", "requirements.txt"]
+  push:
+    branches: [main]
+    paths: ["src/**", "web/**", "terraform/**", "requirements.txt"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write        # OIDC to AWS
+  pull-requests: write   # plan comment
+
+concurrency:
+  group: devops-audit-agent-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest boto3
+      - run: pytest -q
+        env:
+          TEST_PG_HOST: localhost
+          TEST_PG_PORT: "5432"
+
+  terraform:
+    needs: test
+    # In a demo copy of the repo (repository variable AUDIT_AGENT_DEMO = true) deploys go
+    # through deploy-demo.yml instead, so pushes only run the tests.
+    if: vars.AUDIT_AGENT_DEMO != 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # builds the Lambda dependency layer
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AUDIT_AGENT_DEPLOY_ROLE }}
+          aws-region: us-east-1
+      - name: Write backend and variables
+        env:
+          BACKEND_HCL: ${{ secrets.AUDIT_AGENT_BACKEND_HCL }}
+          TFVARS: ${{ secrets.AUDIT_AGENT_TFVARS }}
+        run: |
+          printf '%s\n' "$BACKEND_HCL" > backend.hcl
+          printf '%s\n' "$TFVARS" > terraform.tfvars
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend-config=backend.hcl -input=false
+      - run: terraform validate
+      - run: terraform plan -input=false -out=tfplan
+      - name: Apply on main
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: terraform apply -input=false tfplan

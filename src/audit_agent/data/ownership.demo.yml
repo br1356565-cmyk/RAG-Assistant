@@ -1,0 +1,29 @@
+# Demo ownership for a personal GitHub account (OWNERSHIP_CONFIG=ownership.demo.yml).
+#
+# Personal accounts have no GitHub teams, so ownership comes from repo topics: add the
+# topic `team-web`, `team-data` or `team-platform` to a repo (repo page -> About -> gear).
+# Repos without one land in the admin's unowned queue, which is part of the demo.
+#
+# Entra group ids come from the Terraform variable team_group_ids, so nothing
+# tenant-specific is committed here.
+
+teams:
+  - {id: web,      name: Web Team,      entra_group_id: null}
+  - {id: data,     name: Data Team,     entra_group_id: null}
+  - {id: platform, name: Platform Team, entra_group_id: null}
+
+rules:
+  - team: web
+    topic: [team-web]
+  - team: data
+    topic: [team-data]
+  - team: platform
+    topic: [team-platform]
+    name_contains: [terraform, infra]
+
+fallback_team: null
+
+overrides: {}
+
+# GuardDuty findings (account-level, not repo-level) go to this team.
+aws_findings_team: platform

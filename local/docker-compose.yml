@@ -1,0 +1,31 @@
+# Local prototype services. Everything binds to 127.0.0.1 only.
+#   docker compose up -d                      # Postgres only (use your existing LiteLLM gateway)
+#   docker compose --profile litellm up -d    # also a local LiteLLM in front of Bedrock
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust   # local only; bound to 127.0.0.1 below
+      POSTGRES_DB: audit
+    ports: ["127.0.0.1:5433:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 20
+
+  litellm:
+    profiles: ["litellm"]
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      LITELLM_MASTER_KEY: ${GATEWAY_API_KEY:-sk-local-dev}
+    volumes:
+      - ./litellm.yaml:/app/config.yaml:ro
+      - ${HOME}/.aws:/root/.aws:ro
+    ports: ["127.0.0.1:4000:4000"]
+
+volumes:
+  pgdata: {}

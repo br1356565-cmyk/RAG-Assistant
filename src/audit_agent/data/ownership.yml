@@ -1,0 +1,87 @@
+# Repo -> team ownership. Replaces override.yml and the classification logic that was
+# copied into dependabot_alerts_summary.py, readme.py and branch_divergence.py.
+#
+# Change this file by pull request; it ships with the code and takes effect on the next
+# weekly run. Precedence: overrides, then rules top to bottom (first match wins), then
+# fallback_team.
+#
+# Behaviour change from the old scripts: a repo used to appear in EVERY category it matched
+# (e.g. admin of both uk-engineering and growth-engineering). Now it has exactly one owner.
+
+teams:
+  - {id: uk_engineering,     name: App Engineering,     entra_group_id: null}   # TODO: Entra group object id
+  - {id: growth_engineering, name: Growth Engineering,  entra_group_id: null}
+  - {id: expertise,          name: Expertise,           entra_group_id: null}
+  - {id: de,                 name: Data Engineering,    entra_group_id: null}
+  - {id: data_research,      name: Data Research,       entra_group_id: null}
+  - {id: india,              name: India Engineering,   entra_group_id: null}
+  - {id: platform_devops,    name: Platform DevOps,     entra_group_id: null}
+  # TODO decide: 9 repos below are overridden to "india_cms", which was never a report
+  # category, so they appeared in no team report. Until this team is added (or the
+  # overrides changed), those repos stay unowned and show in the admin's unowned queue.
+  # - {id: india_cms, name: India CMS, entra_group_id: null}
+
+rules:
+  - team: uk_engineering
+    admin_of_github_team: uk-engineering
+  - team: growth_engineering
+    admin_of_github_team: growth-engineering
+  - team: expertise
+    name_prefix: [exp-]
+  - team: de
+    name_prefix: [de-, de_]
+    name_suffix: [-de, _de]
+    name_contains: [-de-, _de_, murps]
+  - team: data_research
+    topic: [data-research]
+    name_prefix: [ds-, research-, analytics-]
+    name_contains: [data-research, data-science, research, analytics]
+
+# The old scripts put every unmatched repo in "india". null sends them to the unowned
+# queue instead, so someone assigns a real owner. Set to "india" for the old behaviour.
+fallback_team: null
+
+overrides:
+  cf-geolocation-worker: india
+  comparecoverage: uk_engineering
+  core-data-platform: de
+  datadome: india
+  dogadvisorycouncil.com: india_cms
+  dollargeek.com: india_cms
+  dreamadvisor: india_cms
+  edit_auto_FA-Automation: de
+  edit_auto_inno_repo: de
+  fm-ga-pipeline: de
+  fm_data_microservices: de
+  fmp-bi-optimizely-pipeline: de
+  fmp-spend-pipeline: de
+  forbes-filings: india_cms        # was listed twice in override.yml (growth, then india-cms); last one won
+  innovate-ace: data_research
+  innovate-homepage: data_research
+  innovate-keyword-mapper: data_research
+  innovate-op-generator: data_research
+  innovate-scrapy: data_research
+  mktp-ab-automation: uk_engineering
+  mktp-admin-site-poc: uk_engineering
+  mktp-cdp-ingestion: uk_engineering
+  mktp-gcp-cdp: uk_engineering
+  mktp-gcp-cdp-roles: uk_engineering
+  mktp-headless-astro-poc: growth_engineering
+  mktp-headless-frontend: growth_engineering
+  mktp-journeys-api: uk_engineering
+  mktp-sem-edge-workers: uk_engineering
+  mktp-sem-tools: uk_engineering
+  motors-api-service: expertise
+  partner-cms: india_cms
+  pet-propensity: de
+  poc-broadband-speed-test-api-worker: growth_engineering
+  poc-mnet-updates-diff-server: growth_engineering
+  posts-reporting: de
+  quadrant-toolkit: de
+  usat-widget-platform: india_cms
+  versusreviews.com: india_cms
+  wp-platform: india_cms
+  wp-s3-uploads-plugin: india_cms
+
+# Findings that aren't about a repo (GuardDuty, Security Hub, VPN) go to this team.
+aws_findings_team: platform_devops

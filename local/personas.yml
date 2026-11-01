@@ -1,0 +1,17 @@
+# People you can "sign in as" in the local prototype. Team ids come from
+# src/audit_agent/data/ownership.yml. Roles: security.admin, team.lead (or none).
+personas:
+  - id: growth-engineer
+    label: Growth Engineering engineer
+    teams: [growth_engineering]
+  - id: uk-lead
+    label: App Engineering lead
+    teams: [uk_engineering]
+    roles: [team.lead]
+  - id: de-engineer
+    label: Data Engineering engineer
+    teams: [de]
+  - id: security-admin
+    label: Security admin (all teams)
+    teams: []
+    roles: [security.admin]
