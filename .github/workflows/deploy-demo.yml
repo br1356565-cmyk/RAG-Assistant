@@ -132,7 +132,7 @@ jobs:
 
       - name: Plan
         run: |
-          terraform plan -input=false -var-file=demo.tfvars ${{ inputs.action == 'destroy' && '-destroy' || '' }} -out=tfplan
+          terraform plan -input=false -var-file=terraform.tfvars ${{ inputs.action == 'destroy' && '-destroy' || '' }} -out=tfplan
           terraform show -no-color tfplan | grep -E '^Plan:|No changes' >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Apply
