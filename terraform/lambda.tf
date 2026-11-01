@@ -74,6 +74,7 @@ locals {
         GUARDDUTY_REGIONS      = join(",", var.guardduty_regions)
         GITHUB_MAX_RATE_WAIT_S = "300" # batch job with a 900 s timeout can afford to wait
       }))
+    }
     notify = {
       handler  = "audit_agent.handlers.notify.handler"
       timeout  = 30
