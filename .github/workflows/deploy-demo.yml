@@ -92,7 +92,7 @@ jobs:
 
       - name: Check inputs
         env:
-          DEMO_TFVARS: ${{ secrets.DEMO_TFVARS }}
+          DEMO_TFVARS: terraform.tfvars
         run: |
           if [ -z "$DEMO_TFVARS" ]; then echo "::error::Add the DEMO_TFVARS secret (contents of demo.tfvars)"; exit 1; fi
           if printf '%s\n' "$DEMO_TFVARS" | grep -v '^[[:space:]]*#' | grep -q '"<'; then
