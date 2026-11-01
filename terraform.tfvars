@@ -2,7 +2,7 @@
 # tenant. Copy to demo.tfvars (git-ignored) and fill in the <...> values.
 # Steps: local/DEPLOY-DEMO.md. Expected cost: ~$25/month; destroy after the demo.
 
-aws_region  = "us-east-1"
+aws_region  = "ap-southeast-2"
 name_prefix = "audit-demo"
 
 # Network: create everything, with a t4g.nano NAT instance instead of a NAT gateway.
