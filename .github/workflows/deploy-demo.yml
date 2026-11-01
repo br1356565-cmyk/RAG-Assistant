@@ -34,7 +34,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
   TF_IN_AUTOMATION: "true"
 
 jobs:
