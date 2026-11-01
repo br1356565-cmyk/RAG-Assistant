@@ -29,9 +29,11 @@ locals {
     # A user is waiting (chat 55 s timeout): don't sit out a long GitHub rate-limit reset.
     GITHUB_MAX_RATE_WAIT_S = "15"
   })
+
   # Unset = the GuardDuty collector reads this account. The variable is left out entirely
   # when there is no role (coalesce() can't return "", and `cond ? {} : {...}` is a type error).
   collect_role_env = { for k, v in { SECURITY_AUDIT_ROLE_ARN = var.security_audit_role_arn } : k => v if v != null }
+
   functions = tomap({
     chat = {
       handler  = "audit_agent.handlers.chat.handler"

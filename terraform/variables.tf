@@ -38,6 +38,16 @@ variable "nat_mode" {
   }
 }
 
+variable "nat_instance_type" {
+  type        = string
+  default     = "t4g.nano"
+  description = "Only with nat_mode = \"instance\". Must be Graviton (arm64). Free-plan accounts only allow free-tier-eligible types: use t4g.micro."
+  validation {
+    condition     = can(regex("^[a-z]+[0-9]+g[a-z]*\\.", var.nat_instance_type))
+    error_message = "Use a Graviton (arm64) type such as t4g.nano or t4g.micro; the NAT AMI is arm64."
+  }
+}
+
 variable "vpc_id" {
   type    = string
   default = null
@@ -96,14 +106,14 @@ variable "batch_model" {
 
 variable "chat_temperature" {
   type        = string
-  default     = "0.2"
-  description = "Grounded Q&A. Use \"none\" for models that reject a temperature (e.g. with extended thinking)."
+  default     = "none"
+  description = "\"none\" sends no temperature: Claude 5.x models reject any non-default value with a 400. Set e.g. \"0.2\" only for models that accept it."
 }
 
 variable "batch_temperature" {
   type        = string
-  default     = "0"
-  description = "Investigations: 0 keeps explanations consistent week to week."
+  default     = "none"
+  description = "As chat_temperature. \"0\" improves week-to-week consistency on models that accept a temperature."
 }
 
 # ── Database ─────────────────────────────────────────────────────────────────
@@ -131,6 +141,12 @@ variable "db_multi_az" {
 variable "db_deletion_protection" {
   type    = bool
   default = true
+}
+
+variable "db_backup_retention_days" {
+  type        = number
+  default     = 7
+  description = "Automated backup retention. Free-plan accounts reject more than the free-tier maximum: use 1."
 }
 
 variable "db_skip_final_snapshot" {

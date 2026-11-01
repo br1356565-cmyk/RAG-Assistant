@@ -53,5 +53,7 @@ collectors        = ["ownership", "dependabot"]
 guardduty_regions = ["us-east-1"]
 
 # Spend guard.
-alarm_email        = "<your email>"
+alarm_email             ="rameshbalaji256001@gmail.com"   # your real address
+nat_instance_type        = "t4g.micro"
+db_backup_retention_days = 1
 monthly_budget_usd = 30

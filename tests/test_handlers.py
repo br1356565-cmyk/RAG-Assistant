@@ -149,10 +149,18 @@ def test_investigation_shows_up_in_chat(wire):
     assert json.loads(tool_msg["content"])["latest_investigation"]["fix"]["target_version"] == "2.3.4"
 
 
-def test_jobs_use_their_own_temperature(wire):
+def test_jobs_use_their_own_temperature(wire, monkeypatch):
+    monkeypatch.setenv("CHAT_TEMPERATURE", "0.2")
+    monkeypatch.setenv("BATCH_TEMPERATURE", "0")
     llm = wire(GROWTH_CLAIMS, [say("Hello.")])
     chat.handler(event({"question": "hi"}), None)
     assert llm.calls[0]["temperature"] == 0.2
     inv = wire({}, [tools(call("get_advisory", {"ghsa_id": GHSA})), tools(call("submit_investigation", REPORT))])
     investigate.handler({"fingerprint": f"F-{G_CRIT}", "team_id": "growth_engineering"}, None)
     assert {c["temperature"] for c in inv.calls} == {0.0}
+
+
+def test_default_sends_no_temperature(wire):
+    llm = wire(GROWTH_CLAIMS, [say("Hello.")])
+    chat.handler(event({"question": "hi"}), None)
+    assert llm.calls[0]["temperature"] is None

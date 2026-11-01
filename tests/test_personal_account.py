@@ -212,3 +212,69 @@ def test_migration_waits_for_the_nat(monkeypatch):
     with pytest.raises(ConnectionError):
         attempts.clear()
         migrate._master_secret("us-east-1", time.monotonic() - 1, client=Flaky(), sleep=lambda s: None)
+
+
+def test_reasoning_blocks_are_sent_back_unchanged():
+    """Claude 5.x thinks by default; the next call must carry that turn's reasoning blocks."""
+    reasoning = {"reasoningContent": {"reasoningText": {"text": "check criticals", "signature": "sig=="}}}
+    redacted = {"reasoningContent": {"redactedContent": b"\x00\x01"}}
+    replies = iter([
+        {"output": {"message": {"content": [reasoning, redacted,
+                                            {"toolUse": {"toolUseId": "t1", "name": "get_trend", "input": {}}}]}},
+         "usage": {}},
+        {"output": {"message": {"content": [{"text": "Done."}]}}, "usage": {}},
+    ])
+    sent = []
+
+    class Client:
+        def converse(self, **kw):
+            sent.append(kw)
+            return next(replies)
+
+    llm = BedrockLLM("ap-southeast-2", client=Client())
+    msgs = [{"role": "user", "content": "trend?"}]
+    first = llm.complete(model="m", messages=msgs, tools=[], tool_choice="auto", max_tokens=10, user="u", tags=[])
+    msgs += [first.as_message(), {"role": "tool", "tool_call_id": "t1", "content": "{}"}]
+    llm.complete(model="m", messages=msgs, tools=[], tool_choice="auto", max_tokens=10, user="u", tags=[])
+    assistant = sent[1]["messages"][1]
+    assert assistant["role"] == "assistant" and assistant["content"][:2] == [reasoning, redacted]
+    assert assistant["content"][2]["toolUse"]["toolUseId"] == "t1"
+
+
+def test_gateway_never_receives_the_bedrock_only_key():
+    from audit_agent.llm import RAW_KEY, GatewayLLM
+    bodies = []
+
+    def handle(req):
+        bodies.append(json.loads(req.content))
+        return httpx.Response(200, json={"id": "x", "object": "chat.completion", "created": 0, "model": "m",
+                                         "choices": [{"index": 0, "finish_reason": "stop",
+                                                      "message": {"role": "assistant", "content": "ok"}}]})
+
+    GatewayLLM("http://gw/v1", "k", http_client=httpx.Client(transport=httpx.MockTransport(handle))).complete(
+        model="m", messages=[{"role": "assistant", "content": "a", RAW_KEY: [{"text": "a"}]},
+                             {"role": "user", "content": "q"}],
+        tools=[], tool_choice="auto", max_tokens=5, user="u", tags=[])
+    assert RAW_KEY not in bodies[0]["messages"][0]
+
+
+def test_forced_tool_rejected_falls_back_to_auto():
+    class ValidationException(Exception):
+        pass
+
+    calls = []
+
+    class Client:
+        def converse(self, **kw):
+            calls.append(json.loads(json.dumps(kw["toolConfig"]["toolChoice"])))
+            if "tool" in kw["toolConfig"]["toolChoice"]:
+                raise ValidationException("Forced tool use is not supported for this model")
+            return {"output": {"message": {"content": [
+                {"toolUse": {"toolUseId": "s", "name": "submit_investigation", "input": {}}}]}}, "usage": {}}
+
+    tools = [{"type": "function", "function": {"name": "submit_investigation", "parameters": {"type": "object"}}}]
+    resp = BedrockLLM("us-east-1", client=Client()).complete(
+        model="m", messages=[{"role": "user", "content": "q"}], tools=tools, max_tokens=5, user="u", tags=[],
+        tool_choice={"type": "function", "function": {"name": "submit_investigation"}})
+    assert calls == [{"tool": {"name": "submit_investigation"}}, {"auto": {}}]
+    assert resp.tool_calls[0].name == "submit_investigation"

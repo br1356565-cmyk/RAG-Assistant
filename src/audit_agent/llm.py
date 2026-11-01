@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
+RAW_KEY = "_converse_content"   # never sent to the gateway; see BedrockLLM
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -24,6 +27,10 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
+    # Bedrock only: the assistant turn exactly as returned, including reasoning blocks.
+    # Claude 5.x thinks by default and rejects a tool result unless the thinking blocks
+    # of that turn are sent back complete and unmodified.
+    raw_content: list | None = None
 
     def as_message(self) -> dict:
         msg: dict[str, Any] = {"role": "assistant", "content": self.text}
@@ -32,6 +39,8 @@ class LLMResponse:
                 {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}}
                 for c in self.tool_calls
             ]
+        if self.raw_content is not None:
+            msg[RAW_KEY] = self.raw_content
         return msg
 
 
@@ -51,6 +60,7 @@ class GatewayLLM:
 
     def complete(self, *, model, messages, tools, tool_choice, max_tokens, user, tags,
                  temperature: float | None = None) -> LLMResponse:
+        messages = [{k: v for k, v in m.items() if k != RAW_KEY} for m in messages]
         kwargs: dict[str, Any] = dict(
             model=model, messages=messages, max_tokens=max_tokens, user=user,
             extra_body={"metadata": {"tags": tags}},  # LiteLLM spend tracking
@@ -124,7 +134,16 @@ class BedrockLLM:
         if tools:
             kwargs["toolConfig"] = {"tools": [_tool_spec(t) for t in tools],
                                     "toolChoice": _tool_choice(tool_choice)}
-        resp = self._client.converse(**kwargs)
+        try:
+            resp = self._client.converse(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            # Some models (e.g. Sonnet 5.5) reject forced tool use; ask with "auto" instead.
+            # The harness still requires the terminal tool, so nothing is lost but certainty.
+            forced = tools and "auto" not in kwargs["toolConfig"]["toolChoice"]
+            if not (forced and _is_validation_error(exc)):
+                raise
+            kwargs["toolConfig"]["toolChoice"] = {"auto": {}}
+            resp = self._client.converse(**kwargs)
         texts, calls = [], []
         for block in (resp.get("output", {}).get("message", {}).get("content") or []):
             if "text" in block:
@@ -133,8 +152,10 @@ class BedrockLLM:
                 u = block["toolUse"]
                 calls.append(ToolCall(id=u["toolUseId"], name=u["name"], arguments=json.dumps(u.get("input") or {})))
         usage = resp.get("usage") or {}
+        raw = list(resp.get("output", {}).get("message", {}).get("content") or [])
         return LLMResponse(text="".join(texts) or None, tool_calls=calls,
-                           tokens_in=usage.get("inputTokens", 0), tokens_out=usage.get("outputTokens", 0))
+                           tokens_in=usage.get("inputTokens", 0), tokens_out=usage.get("outputTokens", 0),
+                           raw_content=raw)
 
 
 def to_converse(messages: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -156,6 +177,8 @@ def to_converse(messages: list[dict]) -> tuple[list[dict], list[dict]]:
                 system.append({"text": content})
         elif role == "user":
             add("user", [{"text": content}] if content else [])
+        elif role == "assistant" and m.get(RAW_KEY):
+            add("assistant", list(m[RAW_KEY]))   # verbatim, so reasoning blocks survive
         elif role == "assistant":
             blocks = [{"text": content}] if content else []
             for c in m.get("tool_calls") or []:
@@ -174,6 +197,11 @@ def to_converse(messages: list[dict]) -> tuple[list[dict], list[dict]]:
         else:
             raise ValueError(f"unsupported message role {role!r}")
     return system, turns
+
+
+def _is_validation_error(exc: Exception) -> bool:
+    code = getattr(exc, "response", {}).get("Error", {}).get("Code", "") if hasattr(exc, "response") else ""
+    return code == "ValidationException" or type(exc).__name__ == "ValidationException"
 
 
 def _tool_spec(tool: dict) -> dict:

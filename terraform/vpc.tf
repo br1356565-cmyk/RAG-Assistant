@@ -127,7 +127,7 @@ resource "aws_vpc_security_group_egress_rule" "nat_out" {
 resource "aws_instance" "nat" {
   count                       = local.nat_inst ? 1 : 0
   ami                         = data.aws_ssm_parameter.al2023_arm[0].value
-  instance_type               = "t4g.nano"
+  instance_type               = var.nat_instance_type
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.nat[0].id]
   associate_public_ip_address = true

@@ -23,8 +23,11 @@ class Settings:
     gateway_keys_secret: str | None
     chat_model: str          # a LiteLLM model alias, e.g. "audit-chat" -> Bedrock Sonnet-class
     batch_model: str         # e.g. "audit-batch" -> Bedrock Haiku-class
-    chat_temperature: float | None    # grounded Q&A: low but not zero
-    batch_temperature: float | None   # investigations: 0 for week-to-week consistency
+    # None (the default) sends no temperature. Claude 5.x models reject any non-default
+    # temperature with a 400, so set a number only for models that accept one
+    # (e.g. 0.2 for chat, 0 for investigations on older models).
+    chat_temperature: float | None
+    batch_temperature: float | None
 
     # Entra ID
     entra_tenant_id: str | None
@@ -56,8 +59,8 @@ class Settings:
             gateway_keys_secret=e.get("GATEWAY_KEYS_SECRET"),
             chat_model=e.get("CHAT_MODEL", "audit-chat"),
             batch_model=e.get("BATCH_MODEL", "audit-batch"),
-            chat_temperature=_temperature(e.get("CHAT_TEMPERATURE", "0.2")),
-            batch_temperature=_temperature(e.get("BATCH_TEMPERATURE", "0")),
+            chat_temperature=_temperature(e.get("CHAT_TEMPERATURE", "none")),
+            batch_temperature=_temperature(e.get("BATCH_TEMPERATURE", "none")),
             entra_tenant_id=e.get("ENTRA_TENANT_ID"),
             entra_audience=e.get("ENTRA_AUDIENCE"),
             llm_backend=_choice("LLM_BACKEND", e.get("LLM_BACKEND", "gateway"), ("gateway", "bedrock")),
