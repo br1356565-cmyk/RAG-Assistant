@@ -30,15 +30,14 @@ investigate_max_concurrency = 2
 max_investigations_per_run  = 20
 
 # Identity: your own Entra tenant (see DEPLOY-DEMO.md, step 2).
-entra_tenant_id = "<tenant id>"
-entra_client_id = "<application (client) id>"
+entra_tenant_id = "42919981-4639-4573-aca3-da94a49690e9"
+entra_client_id = "2a5b800c-5fb9-443a-add3-85adad30507e"
 allowed_cidrs   = [] # no WAF ($6/month); the app still requires an Entra login
 team_group_ids = {
-  web      = "<object id of group 'audit-web'>"
-  data     = "<object id of group 'audit-data'>"
-  platform = "<object id of group 'audit-platform'>"
+  web      = "29724f6f-c945-455f-b54b-1a8078e43324"
+  data     = "a2f0645b-9d61-4b5f-b390-2234f592428e"
+  platform = "949d6356-6288-4fbe-8c63-f27ffcf8b644"
 }
-
 # GitHub: an App installed on your personal account.
 github_org             = "<your GitHub username>"
 github_owner_type      = "user"
