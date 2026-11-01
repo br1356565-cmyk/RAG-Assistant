@@ -29,7 +29,9 @@ locals {
     # A user is waiting (chat 55 s timeout): don't sit out a long GitHub rate-limit reset.
     GITHUB_MAX_RATE_WAIT_S = "15"
   })
-
+  # Unset = the GuardDuty collector reads this account. The variable is left out entirely
+  # when there is no role (coalesce() can't return "", and `cond ? {} : {...}` is a type error).
+  collect_role_env = { for k, v in { SECURITY_AUDIT_ROLE_ARN = var.security_audit_role_arn } : k => v if v != null }
   functions = tomap({
     chat = {
       handler  = "audit_agent.handlers.chat.handler"
@@ -65,15 +67,13 @@ locals {
       memory   = 1024
       in_vpc   = false # only calls GitHub/AWS APIs and writes to S3
       reserved = -1
-      env = tomap(merge(local.github_env, {
-        DATA_BUCKET             = aws_s3_bucket.data.bucket
-        SECURITY_AUDIT_ROLE_ARN = coalesce(var.security_audit_role_arn, "")
-        OWNERSHIP_CONFIG        = var.ownership_config
-        TEAM_GROUP_IDS          = jsonencode(var.team_group_ids)
-        GUARDDUTY_REGIONS       = join(",", var.guardduty_regions)
-        GITHUB_MAX_RATE_WAIT_S  = "300" # batch job with a 900 s timeout can afford to wait
+      env = tomap(merge(local.github_env, local.collect_role_env, {
+        DATA_BUCKET            = aws_s3_bucket.data.bucket
+        OWNERSHIP_CONFIG       = var.ownership_config
+        TEAM_GROUP_IDS         = jsonencode(var.team_group_ids)
+        GUARDDUTY_REGIONS      = join(",", var.guardduty_regions)
+        GITHUB_MAX_RATE_WAIT_S = "300" # batch job with a 900 s timeout can afford to wait
       }))
-    }
     notify = {
       handler  = "audit_agent.handlers.notify.handler"
       timeout  = 30
