@@ -12,8 +12,10 @@ nat_mode   = "instance"
 # Models: Bedrock directly (no LiteLLM gateway in this account). Use the inference-profile
 # ids shown in the Bedrock console (Model catalog -> model -> "Inference profile ID").
 llm_backend = "bedrock"
-chat_model  = "<Sonnet-class inference profile id, e.g. us.anthropic....>"
-batch_model = "<Haiku-class inference profile id>"
+chat_model        = "au.anthropic.claude-sonnet-5-5"
+batch_model       = "au.anthropic.claude-haiku-5-5"
+chat_temperature  = "none"
+batch_temperature = "none"
 
 # Small and disposable.
 db_instance_class      = "db.t3.micro"
