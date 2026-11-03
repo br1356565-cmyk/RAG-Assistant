@@ -40,12 +40,6 @@ team_group_ids = {
   data     = "a2f0645b-9d61-4b5f-b390-2234f592428e"
   platform = "949d6356-6288-4fbe-8c63-f27ffcf8b644"
 }
-# GitHub: an App installed on your personal account.
-github_org             = "<your GitHub username>"
-github_owner_type      = "user"
-github_app_id          = "<app id>"
-github_installation_id = "<installation id>"
-ownership_config       = "ownership.demo.yml"
 
 # GuardDuty is optional: enable it in the console first (trial on the paid plan only), generate sample
 # findings, then add "guardduty" here.
