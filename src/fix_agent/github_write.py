@@ -27,6 +27,18 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+FIX_APP_VARS = ("FIX_GITHUB_APP_ID", "FIX_GITHUB_INSTALLATION_ID", "FIX_GITHUB_PRIVATE_KEY_SECRET")
+
+
+def _check_writer_config() -> None:
+    missing = [v for v in FIX_APP_VARS if not os.environ.get(v)]
+    if missing:
+        raise WriteRefused(
+            "The fix-bot GitHub App is not set up, so no pull request can be opened. Set "
+            "fix_github_app_id and fix_github_installation_id in Terraform and store the App's private "
+            "key (DEPLOY-DEMO.md step 6b.4), then draft the fix again.")
+
+
 @lru_cache(maxsize=1)
 def _default_writer():
     from audit_agent.config import Settings, load_secret
@@ -51,6 +63,8 @@ def open_fix_pr(db: Database, scope: Scope, fix_request_id: str, claims: dict | 
     if not row["new_content"] or content_hash(row["new_content"]) != row["approved_sha256"]:
         raise WriteRefused("content changed after approval")
 
+    if writer is None:
+        _check_writer_config()
     w = writer or _default_writer()
     base = w.default_branch(row["repo"])
     branch = f"audit-fix/{row['fingerprint'][:8]}-{fix_request_id[:8]}"

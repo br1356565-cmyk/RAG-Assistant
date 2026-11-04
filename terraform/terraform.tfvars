@@ -63,20 +63,32 @@ max_confidence_retries    = 2
 verify_answers            = true
 review_gate_timeout_hours = 72
 
-# AgentCore (DEPLOY-DEMO.md step 6b). false = the all-Lambda design that is deployed today.
+# AgentCore (DEPLOY-DEMO.md step 6b). false = the all-Lambda design.
 agentcore_enabled          = true
 agentcore_policy_mode      = "ENFORCE"
 agentcore_memory_long_term = false # extraction uses an AgentCore-managed model
 agentcore_tracing          = false # needs CloudWatch Transaction Search turned on first
 
-# Fix agent: a second GitHub App with write access, used only for approved fix PRs.
-# Until it exists, fixes can be drafted and approved but no PR is opened.
+# Fix agent: GitHub App used only for approved fix PRs.
+# NOTE: these are the SAME App as github_app_id above. That works only if that App has
+# Contents + Pull requests: write, and then the read path's tokens can write too. For the
+# intended separation, create a second App (write perms, demo repos only) and put its ids here.
 fix_agent_enabled          = true
-fix_github_app_id          = "5594367" # the fix-bot App ID, as a string
-fix_github_installation_id =  "178167841" # its installation ID, as a string
+fix_github_app_id          = "5594367"
+fix_github_installation_id = "178167841"
 
 # Server diagnostics through SSM (read-only checks); off for now.
 diagnostics_enabled = false
+
+# AWS read tools for chat (team = the resource's `team` tag). Logs Insights is billed per GB
+# scanned (cents here); Config and Security Hub bill per recorded change / check and may not
+# be allowed on a Free-plan account, so they stay off until you choose to try them.
+aws_logs_tool_enabled   = true
+logs_tool_max_hours     = 24
+aws_config_tool_enabled = false # needs a Config recorder (enable_config_recorder, or the account's own)
+enable_config_recorder  = false
+enable_securityhub      = false # then add "securityhub" to collectors
+demo_aws_resources      = true  # /demo/storefront log group (team web) + an unversioned bucket (team data)
 
 # Spend guard.
 alarm_email        = "rameshbalaji256001@gmail.com"

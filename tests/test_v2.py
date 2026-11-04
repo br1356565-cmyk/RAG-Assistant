@@ -585,3 +585,28 @@ def test_gateway_client_gives_up_without_a_supported_list(db):
                        http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(400, text="nope"))))
     with pytest.raises(GatewayError, match="HTTP 400"):
         gw.call("get_advisory", {"ghsa_id": GHSA}, GROWTH)
+
+
+def test_approving_without_the_fix_bot_app_says_what_is_missing(db, fix_service, monkeypatch):
+    from audit_agent.fix_client import LocalFixClient
+    from fix_agent.github_write import open_fix_pr
+    from fix_agent.graph import FixDeps
+    from fix_agent.service import FixService
+    for var in ("FIX_GITHUB_APP_ID", "FIX_GITHUB_INSTALLATION_ID", "FIX_GITHUB_PRIVATE_KEY_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    service, _ = fix_service
+    # the same graph, but the real write path (no injected writer), as on AWS
+    real = FixService(FixDeps(db=db, read_file=service.deps.read_file,
+                              open_pr=lambda scope, fid: open_fix_pr(db, scope, fid)), service.graph.checkpointer)
+    client = LocalFixClient(real)
+    fid = client.request_fix(GROWTH, G_CRIT)["fix_request_id"]
+    status, out = api.decide_fix(deps_for(db, fix_client=client), LEAD, {"fix_request_id": fid, "decision": "approved"})
+    assert status == 200 and out["status"] == "failed" and "fix-bot GitHub App is not set up" in out["error"]
+
+
+def test_gateway_write_tool_passes_refusals_through(db):
+    from audit_agent.handlers import gateway_tools
+    env = (Settings.from_env(), KEY, db, FakeGitHub(), None)
+    out = gateway_tools.handler({"fix_request_id": "00000000-0000-0000-0000-000000000000", "_scope": sign(GROWTH, KEY)},
+                                Ctx("gh-write___open_fix_pr"), env=env)
+    assert out == {"error": "fix request not found in scope"}

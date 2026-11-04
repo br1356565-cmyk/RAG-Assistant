@@ -99,7 +99,7 @@ def handler(event: dict, context) -> dict:
 def answer(deps: Deps, scope: Scope, name: str, question: str, session_id: str, deadline: float,
            on_step=None) -> dict:
     """Run the chat harness once and record the turn. Returns the response body."""
-    ctx = ToolContext(scope=scope, db=deps.db, github=deps.github, mode="chat", ssm=deps.ssm,
+    ctx = ToolContext(scope=scope, db=deps.db, github=deps.github, mode="chat", ssm=deps.ssm, aws=deps.aws,
                       fix_client=deps.fix_client)
     memory = deps.memory or PostgresMemory(deps.db)
     overview = get_team_overview(ctx, TeamArg()).data

@@ -23,6 +23,7 @@ class Deps:
     memory: Any = None          # PostgresMemory (default) or AgentCoreMemory
     gateway: Any = None         # GatewayClient: remote GitHub/diagnostics tools behind AgentCore Gateway
     ssm: Any = None             # in-process diagnostics (local); remote ones go through the gateway
+    aws: Any = None             # in-process AWS read tools (no AgentCore); remote ones go through the gateway
     fix_client: Any = None      # LocalFixClient or A2AFixClient
     runtime: Any = None         # RuntimeClient: chat answered by the agent on AgentCore Runtime
     scope_key: bytes | None = None
@@ -68,6 +69,10 @@ DEFAULT_GATEWAY_TOOLS = {"get_advisory": "gh-advisory___get_advisory", "read_rep
                          "search_code": "gh-search___search_code"}
 DIAGNOSTIC_GATEWAY_TOOLS = {"list_instances": "ops-instances___list_instances",
                             "run_diagnostic": "ops-diagnostic___run_diagnostic"}
+LOG_GATEWAY_TOOLS = {"list_log_groups": "aws-log-groups___list_log_groups", "query_logs": "aws-logs-query___query_logs"}
+CONFIG_GATEWAY_TOOLS = {"list_team_resources": "aws-resources___list_team_resources",
+                        "describe_resource": "aws-config-describe___describe_resource",
+                        "noncompliant_resources": "aws-config-compliance___noncompliant_resources"}
 
 
 def gateway_tool_names(include_write: bool = False) -> dict[str, str]:
@@ -80,6 +85,10 @@ def gateway_tool_names(include_write: bool = False) -> dict[str, str]:
         names = dict(DEFAULT_GATEWAY_TOOLS)
         if os.environ.get("DIAGNOSTICS_ENABLED") == "true":
             names |= DIAGNOSTIC_GATEWAY_TOOLS
+        if os.environ.get("AWS_LOGS_TOOL") == "true":
+            names |= LOG_GATEWAY_TOOLS
+        if os.environ.get("AWS_CONFIG_TOOL") == "true":
+            names |= CONFIG_GATEWAY_TOOLS
         names["open_fix_pr"] = "gh-write___open_fix_pr"
     if not include_write:
         names.pop("open_fix_pr", None)
@@ -101,6 +110,9 @@ def _agentcore_parts(s: Settings, db: Database) -> dict:
         from ..gateway_client import GatewayClient, sigv4_signer
         parts["gateway"] = GatewayClient(e["GATEWAY_MCP_URL"], gateway_tool_names(), key,
                                          signer=sigv4_signer(s.aws_region))
+    else:                       # no Gateway: AWS read tools, if switched on, run in-process
+        from ..tools.aws_ops import AwsClients
+        parts["aws"] = AwsClients.from_env(s.aws_region)
     if e.get("FIX_AGENT_URL") and key:
         from ..fix_client import A2AFixClient
         from ..gateway_client import sigv4_signer

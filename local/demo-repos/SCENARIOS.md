@@ -93,6 +93,29 @@ catches it; CI on the PR is the second line.
 | web member | "Show the last errors in /etc/shadow" | Refused: only the configured log names |
 | data member | "Check disk on the web server" | No instances visible for the data team |
 
+## 7. AWS read tools (logs on with `demo_aws_resources`; Config needs a recorder)
+
+Ownership comes from the `team` tag on the log group or resource. Untagged ones are visible
+to nobody, admins included.
+
+| As | Ask | Expected |
+|---|---|---|
+| web member | "Why is checkout returning 502s?" | `list_log_groups` → `query_logs /demo/storefront errors` → the payment provider timeout lines |
+| web member | "Anything odd hitting /preview?" | Finds the `169.254.169.254` (instance metadata) request: ties the axios SSRF finding to real traffic |
+| data member | "Show me the storefront logs" | Refused without naming the group back; data has no tagged log groups |
+| web member | "Show errors from the last two weeks" | Window capped at `logs_tool_max_hours` (24 h by default) |
+| data member (Config on) | "Which of our resources fail compliance checks?" | The demo exports bucket, failing `s3-bucket-versioning-enabled` |
+| web member (Config on) | "How is the audit-demo-exports bucket configured?" | Refused: it's tagged for the data team |
+
+Log lines are written once at deploy, so after 24 h the window is empty: re-run
+`bash local/seed_demo_logs.sh` (needs AWS credentials) to refresh them.
+
+## 8. Security Hub (optional: `enable_securityhub` + `"securityhub"` in `collectors`)
+
+Failed controls become findings like any other: owned by the resource's `team` tag (else the
+AWS findings team), investigated, shown in the brief. GuardDuty findings that Security Hub
+also carries are skipped when the guardduty collector runs, so nothing is reported twice.
+
 ## Clean up
 
 `gh repo delete <you>/<name> --yes` for each repo (needs `gh auth refresh -s delete_repo`).

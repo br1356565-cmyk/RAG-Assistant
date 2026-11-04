@@ -64,6 +64,44 @@ locals {
         { name = "check", description = "One of the fixed checks", required = true },
       { name = "target", description = "Service or log name, for service_status and recent_logs", required = false }])
     }
+    aws-log-groups = {
+      enabled     = var.aws_logs_tool_enabled
+      tool        = "list_log_groups"
+      description = "CloudWatch log groups tagged for the caller's team."
+      callers     = "chat"
+      props       = jsonencode([])
+    }
+    aws-logs-query = {
+      enabled     = var.aws_logs_tool_enabled
+      tool        = "query_logs"
+      description = "Search one of the caller's team log groups with a fixed query template."
+      callers     = "chat"
+      props = jsonencode([{ name = "log_group", description = "Log group name", required = true },
+        { name = "template", description = "recent | errors | error_counts | top_messages | search", required = true },
+        { name = "filter", description = "Literal text lines must contain", required = false },
+      { name = "hours", description = "How far back to look", required = false, type = "integer" }])
+    }
+    aws-resources = {
+      enabled     = var.aws_config_tool_enabled
+      tool        = "list_team_resources"
+      description = "AWS resources tagged for the caller's team."
+      callers     = "chat"
+      props       = jsonencode([{ name = "resource_type", description = "Optional service or service:type", required = false }])
+    }
+    aws-config-describe = {
+      enabled     = var.aws_config_tool_enabled
+      tool        = "describe_resource"
+      description = "AWS Config record of one of the caller's team resources."
+      callers     = "chat"
+      props       = jsonencode([{ name = "arn", description = "Resource ARN", required = true }])
+    }
+    aws-config-compliance = {
+      enabled     = var.aws_config_tool_enabled
+      tool        = "noncompliant_resources"
+      description = "The caller's team resources that fail AWS Config rules."
+      callers     = "chat"
+      props       = jsonencode([])
+    }
     gh-write = {
       enabled     = var.fix_agent_enabled
       tool        = "open_fix_pr"
@@ -481,7 +519,7 @@ resource "aws_bedrockagentcore_gateway_target" "tool" {
                 for_each = jsondecode(each.value.props)
                 content {
                   name        = property.value.name
-                  type        = "string"
+                  type        = try(property.value.type, "string")
                   description = property.value.description
                   required    = property.value.required
                 }
@@ -525,7 +563,7 @@ locals {
       targets     = tolist([for t, v in local.tool_targets : t if contains(["read", "read+fix"], v.callers)])
     }
     ops_tools = {
-      description = "Only the chat agent may run server diagnostics"
+      description = "Only the chat agent may use server diagnostics and the AWS read tools"
       callers     = tolist([for c in flatten([local.role_session.chat, local.role_session.audit_runtime]) : c])
       targets     = tolist([for t, v in local.tool_targets : t if v.callers == "chat"])
     }
@@ -571,6 +609,9 @@ locals {
     DIAGNOSTIC_SERVICES    = join(",", var.diagnostic_services)
     DIAGNOSTIC_LOGS        = join(",", keys(var.diagnostic_logs))
     GITHUB_MAX_RATE_WAIT_S = "15"
+    AWS_LOGS_TOOL          = tostring(var.aws_logs_tool_enabled)
+    AWS_CONFIG_TOOL        = tostring(var.aws_config_tool_enabled)
+    LOGS_MAX_HOURS         = tostring(var.logs_tool_max_hours)
     }, { for k, v in {
       FIX_GITHUB_APP_ID             = var.fix_github_app_id
       FIX_GITHUB_INSTALLATION_ID    = var.fix_github_installation_id
@@ -633,6 +674,23 @@ data "aws_iam_policy_document" "tools" {
     for_each = var.diagnostics_enabled ? [1] : []
     content {
       actions   = ["ssm:GetCommandInvocation", "ec2:DescribeInstances"]
+      resources = ["*"]
+    }
+  }
+  # AWS read tools. Team scope is enforced in the tool code (tags), so IAM grants read-only
+  # actions; nothing here can change a resource.
+  dynamic "statement" {
+    for_each = var.aws_logs_tool_enabled ? [1] : []
+    content {
+      actions = ["logs:DescribeLogGroups", "logs:ListTagsForResource", "logs:ListTagsLogGroup",
+      "logs:StartQuery", "logs:GetQueryResults", "logs:StopQuery"]
+      resources = ["*"]
+    }
+  }
+  dynamic "statement" {
+    for_each = var.aws_config_tool_enabled ? [1] : []
+    content {
+      actions   = ["tag:GetResources", "config:SelectResourceConfig"]
       resources = ["*"]
     }
   }

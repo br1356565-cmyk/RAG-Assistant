@@ -82,6 +82,16 @@ diagnostics_enabled       = false
 diagnostics_demo_instance = false
 diagnostics_demo_team     = "web"
 
+# AWS read tools for chat (team = the resource's `team` tag). Logs Insights is billed per GB
+# scanned (cents here); Config and Security Hub bill per recorded change / check and may not
+# be allowed on a Free-plan account, so they stay off until you choose to try them.
+aws_logs_tool_enabled   = true
+logs_tool_max_hours     = 24
+aws_config_tool_enabled = false # needs a Config recorder (enable_config_recorder, or the account's own)
+enable_config_recorder  = false
+enable_securityhub      = false # then add "securityhub" to collectors
+demo_aws_resources      = true  # /demo/storefront log group (team web) + an unversioned bucket (team data)
+
 # Spend guard.
 alarm_email        = "<your email>"
 monthly_budget_usd = 30

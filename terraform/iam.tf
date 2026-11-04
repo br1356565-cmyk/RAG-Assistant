@@ -49,6 +49,11 @@ locals {
       # the review API releases the weekly run's review gate. Task-token calls are authorized
       # by the (unguessable) token; IAM's resource for them is "*".
       { actions = ["states:SendTaskSuccess"], resources = ["*"] },
+      # AWS read tools in-process (only without AgentCore; otherwise the tools Lambda has them)
+      { actions = ["logs:DescribeLogGroups", "logs:ListTagsForResource", "logs:ListTagsLogGroup", "logs:StartQuery",
+      "logs:GetQueryResults", "logs:StopQuery"], resources = !local.agentcore && var.aws_logs_tool_enabled ? ["*"] : [] },
+      { actions = ["tag:GetResources", "config:SelectResourceConfig"],
+      resources = !local.agentcore && var.aws_config_tool_enabled ? ["*"] : [] },
       # the review API asks the fix agent to open an approved PR (A2A over SigV4)
       { actions = ["bedrock-agentcore:InvokeAgentRuntime"], resources = local.agentcore && var.fix_agent_enabled ? [
         "arn:${local.partition}:bedrock-agentcore:${var.aws_region}:${local.account_id}:runtime/${local.ac_name}_fix-*",
@@ -70,6 +75,7 @@ locals {
       { actions = ["sts:AssumeRole"], resources = var.security_audit_role_arn == null ? [] : [var.security_audit_role_arn] },
       # used only when no security_audit_role_arn is set (GuardDuty read in this account)
       { actions = ["guardduty:ListDetectors", "guardduty:ListFindings", "guardduty:GetFindings"], resources = ["*"] },
+      { actions = ["securityhub:GetFindings"], resources = ["*"] },
     ]
     notify = [
       { actions = ["secretsmanager:GetSecretValue"], resources = [aws_secretsmanager_secret.slack_webhook.arn] },

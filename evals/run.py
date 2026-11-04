@@ -90,7 +90,8 @@ def run_case(case: dict, mode: str, settings: Settings, llm=None) -> dict:
     model = ReplayLLM(case.get("script", []), case.get("verdicts", [])) if mode == "replay" else llm
     st = dataclasses.replace(settings, verify_answers=verify)
     db = world.app_db()
-    deps = Deps(settings=st, db=db, verifier=None, llm_for=lambda t: model, github=world.EvalGitHub())
+    deps = Deps(settings=st, db=db, verifier=None, llm_for=lambda t: model, github=world.EvalGitHub(),
+                aws=world.eval_aws())
     t0 = time.monotonic()
     try:
         body = chat.answer(deps, scope, "Eval user", case["question"], f"eval-{case['id']}", 50.0)

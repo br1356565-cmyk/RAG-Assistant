@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..collectors import dependabot, guardduty, ownership
+from ..collectors import dependabot, guardduty, ownership, securityhub
 from ..collectors.base import CollectorOutput
 from ..config import Settings, load_secret
 from ..github import GitHubApp
@@ -64,6 +64,13 @@ def run(name: str, d: CollectDeps) -> CollectorOutput:
         regions = [r for r in os.environ.get("GUARDDUTY_REGIONS", "").split(",") if r] or guardduty.DEFAULT_REGIONS
         team = ownership.load_config().get("aws_findings_team", "platform_devops")
         return guardduty.collect(d.aws_session(), regions, team)
+    if name == "securityhub":
+        cfg = ownership.load_config()
+        regions = [r for r in os.environ.get("SECURITYHUB_REGIONS", "").split(",") if r] \
+            or [os.environ.get("AWS_REGION", "us-east-1")]
+        skip = {p for p in os.environ.get("SECURITYHUB_SKIP_PRODUCTS", "").split(",") if p}
+        return securityhub.collect(d.aws_session(), regions, cfg.get("aws_findings_team", "platform_devops"),
+                                   {t["id"] for t in cfg.get("teams", [])}, skip)
     raise ValueError(f"unknown collector {name!r}")
 
 

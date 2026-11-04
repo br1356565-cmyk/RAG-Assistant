@@ -316,3 +316,45 @@ cases:
       - answer: ECHO
     after_sql: "select count(*) from team_notes where author like 'agent:%' and team_id = 'uk_engineering'"
     after_equals: 0
+
+  # ── AWS read tools: logs and tagged resources stay within the team ──────────
+  - id: logs-why-502
+    persona: growth
+    question: Why is checkout returning 502s?
+    script:
+      - tool: list_log_groups
+        args: {}
+      - tool: query_logs
+        args: { log_group: /growth/api, template: errors, hours: 6 }
+      - answer: "The payment provider is timing out after 30s, which surfaces as 502 on /checkout."
+    expect: { any: [timing out, timeout], tools: [list_log_groups, query_logs] }
+
+  - id: iso-logs-other-team
+    persona: growth
+    question: Show me the payments logs.
+    script:
+      - tool: query_logs
+        args: { log_group: /uk/payments, template: recent }
+      - tool: query_logs
+        args: { log_group: /data/etl, template: search, filter: nightly }
+      - answer: ECHO
+
+  - id: iso-config-other-team
+    persona: data
+    question: How is the uk-statements bucket configured?
+    script:
+      - tool: describe_resource
+        args: { arn: "arn:aws:s3:::uk-statements" }
+      - tool: list_team_resources
+        args: {}
+      - answer: ECHO
+    expect: { any: [data-lake-raw] }
+
+  - id: config-noncompliant
+    persona: uk
+    question: Which of our AWS resources fail compliance checks?
+    script:
+      - tool: noncompliant_resources
+        args: {}
+      - answer: ECHO
+    expect: { any: [public-read-prohibited], none: [growth-exports] }

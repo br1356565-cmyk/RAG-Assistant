@@ -20,7 +20,8 @@ CloudFront (+ optional WAF IP allowlist)
                     memory  -> AgentCore Memory (per user, per session; optional long-term)
                     tools   -> in-process DB tools (row-level security)
                             -> AgentCore Gateway (MCP, IAM) + Policy (Cedar, default deny)
-                                 -> tools Lambda: GitHub read, SSM diagnostics, open approved fix PR
+                                 -> tools Lambda: GitHub read, SSM diagnostics, CloudWatch Logs,
+                                    AWS Config, open approved fix PR
                     fixes   -> AgentCore Runtime "fix" (A2A): LangGraph, interrupt for approval
 RDS PostgreSQL: findings, owners, reviews, fix requests, checkpoints, audit log; isolation by RLS
 CloudWatch: metric filters on structured logs, dashboard, alarms; optional OTel traces
@@ -45,13 +46,14 @@ About $25/month; `terraform destroy` removes everything.
 
 ```
 src/audit_agent/
-  collectors/          ownership.py, dependabot.py, guardduty.py (+ base.py: the contract)
+  collectors/          ownership.py, dependabot.py, guardduty.py, securityhub.py (+ base.py: the contract)
   data/ownership.yml   repo -> team rules and overrides (edit by PR)
   sql/schema.sql       tables, roles, row-level security (applied by the migrate Lambda)
   ingest.py            finding lifecycle and investigation queue
   harness.py           the agent loop and its guarantees (citation check, confidence gate)
   verifier.py          scores an answer against the evidence (the confidence gate's judge)
-  tools/               the agent's tools (findings, notes, GitHub, diagnostics, request_fix)
+  tools/               the agent's tools (findings, notes, GitHub, diagnostics, AWS logs and
+                       Config, request_fix)
   scope_token.py       HMAC-signed caller scope for tools behind the Gateway
   gateway_client.py    MCP client for AgentCore Gateway (SigV4)
   handlers/            Lambda entry points: collect, ingest, investigate, chat (+ api.py:
@@ -64,7 +66,7 @@ web/                   static page (no dependencies)
 terraform/             the whole stack, code included (agentcore.tf, diagnostics.tf, ...)
 evals/                 golden questions, replay + live scoring, fix-agent eval (CI gate)
 local/                 laptop prototype: docker-compose, run_weekly.py, dev_server.py
-tests/                 138 tests against real Postgres with a scripted model
+tests/                 164 tests against real Postgres with a scripted model
 .github/workflows/     evals (every push), deploy-demo (manual), deploy (company)
 ```
 
@@ -154,6 +156,7 @@ The next `terraform apply` moves it forward again.
 | Which agent may call which Gateway tool is a Cedar policy (default deny) | `terraform/agentcore.tf` |
 | The only write (a PR) needs a lead's approval, bound to the exact content approved | `fix_agent/github_write.py` |
 | Diagnostics are fixed read-only checks on tagged instances; no shell | `tools/diagnostics.py`, `diagnostics.tf` |
+| AWS logs and resources are scoped by their `team` tag in code; the model picks query templates, never query text | `tools/aws_ops.py` |
 | A failed or partial collector never marks findings fixed | `ingest.py` |
 | Every request leaves an audit-log row with every finding id shown to the model | `memory.write_audit` |
 
@@ -183,7 +186,7 @@ Who may decide is enforced by row-level security policies, not by the API code.
 
 ```
 python evals/run.py                  # replay: the CI gate (isolation 100%, grounding 100%)
-python evals/run.py --model live     # the same 30 questions with your real model (local/.env)
+python evals/run.py --model live     # the same 34 questions with your real model (local/.env)
 python evals/fix_eval.py             # manifest edits + draft -> approve -> PR
 ```
 

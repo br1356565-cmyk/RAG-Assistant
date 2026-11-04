@@ -239,6 +239,10 @@ variable "collectors" {
     condition     = contains(var.collectors, "ownership")
     error_message = "The ownership collector must run; other findings get their team from it."
   }
+  validation {
+    condition     = alltrue([for c in var.collectors : contains(["ownership", "dependabot", "guardduty", "securityhub"], c)])
+    error_message = "Collectors: ownership, dependabot, guardduty, securityhub."
+  }
 }
 
 variable "security_audit_role_arn" {
@@ -472,4 +476,53 @@ variable "diagnostics_demo_team" {
   type        = string
   default     = null
   description = "Team id that owns the demo instance (its `team` tag). Required with diagnostics_demo_instance."
+}
+
+# ── AWS read tools for chat (CloudWatch Logs Insights, AWS Config) ───────────
+variable "aws_logs_tool_enabled" {
+  type        = bool
+  default     = false
+  description = "Chat can search CloudWatch log groups tagged team=<team id> (fixed query templates, read-only)."
+}
+
+variable "logs_tool_max_hours" {
+  type        = number
+  default     = 24
+  description = "Longest time window a log query may cover (bounds the data each query scans, and its cost)."
+  validation {
+    condition     = var.logs_tool_max_hours >= 1 && var.logs_tool_max_hours <= 168
+    error_message = "Use 1 to 168 hours."
+  }
+}
+
+variable "aws_config_tool_enabled" {
+  type        = bool
+  default     = false
+  description = "Chat can list AWS resources tagged team=<team id>, read their AWS Config record and failing Config rules."
+}
+
+variable "enable_config_recorder" {
+  type        = bool
+  default     = false
+  description = "Create an AWS Config recorder (S3 buckets, EC2 instances, security groups only) and three managed rules. Leave false if the account already has a recorder in this region (one per region)."
+}
+
+# ── Security Hub ────────────────────────────────────────────────────────────
+variable "enable_securityhub" {
+  type        = bool
+  default     = false
+  description = "Turn on Security Hub with the AWS Foundational Security Best Practices standard (most controls need an AWS Config recorder). Add \"securityhub\" to collectors to report its findings."
+}
+
+variable "securityhub_regions" {
+  type        = list(string)
+  default     = []
+  description = "Regions the securityhub collector reads. Empty = the deployment region."
+}
+
+# ── Demo AWS resources for the AWS tools ────────────────────────────────────
+variable "demo_aws_resources" {
+  type        = bool
+  default     = false
+  description = "Create a log group /demo/storefront (team web) with sample log lines, and an S3 bucket (team data) without versioning, so the logs and Config tools have something to find."
 }

@@ -252,6 +252,12 @@
         status.textContent = "Saving…";
         try {
           const { data } = await postJSON(path, { ...(typeof payload === "function" ? payload() : payload), decision });
+          if (data.status === "failed") {             // decision recorded, but the PR could not be opened
+            status.textContent = `Approved, but no PR was opened: ${data.error || "unknown error"}`;
+            card.classList.add("decided");
+            refreshReviewCount();
+            return;
+          }
           status.textContent = data.pr_url ? `PR opened: ${data.pr_url}`
             : (decisionLabel[data.status || data.state] || "Saved");
           card.classList.add("decided");

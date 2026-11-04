@@ -227,6 +227,15 @@ policy engine. Before the first apply:
    and `diagnostics_demo_team = "web"` create one t4g.micro (no inbound ports) the chat agent
    can run read-only checks on through SSM ("is nginx up on our server?").
 
+7. **AWS read tools:** `aws_logs_tool_enabled = true` lets chat search CloudWatch log groups
+   tagged `team=<team id>` (fixed query templates, window capped by `logs_tool_max_hours`).
+   `demo_aws_resources = true` creates `/demo/storefront` (team web) with sample lines and an
+   unversioned bucket (team data). `aws_config_tool_enabled` needs an AWS Config recorder:
+   `enable_config_recorder = true` creates one for S3, EC2 and security groups (skip it if the
+   account already has a recorder in this region). `enable_securityhub = true` plus
+   `"securityhub"` in `collectors` adds Security Hub findings to the weekly run. Config and
+   Security Hub are billed per change / check and may not be allowed on a Free-plan account.
+
 **Demo script for review and fixes**
 - As **asha** (member): open a critical Dependabot item in the brief → **Draft a fix**. The
   agent drafts the package.json change. Click **Review**: the diff is there, but asha can't approve it.

@@ -24,6 +24,22 @@ def label(name: str, raw_args: str | None) -> str:
     except (json.JSONDecodeError, TypeError):
         a = {}
 
+    if name == "list_log_groups":
+        return "Listing your team's log groups"
+    if name == "query_logs":
+        what = {"recent": "recent lines", "errors": "errors", "error_counts": "error counts",
+                "top_messages": "most frequent messages", "search": "matching lines"}.get(a.get("template"), "logs")
+        text = f"Reading {what} in {_s(a.get('log_group', 'a log group'), 50)}"
+        if a.get("filter"):
+            text += f" containing “{_s(a['filter'], 30)}”"
+        hours = a.get("hours")
+        return text + (f" (last {int(hours)} h)" if isinstance(hours, (int, float)) else "")
+    if name == "list_team_resources":
+        return "Listing your team's AWS resources" + (f" ({_s(a['resource_type'], 30)})" if a.get("resource_type") else "")
+    if name == "describe_resource":
+        return f"Checking AWS Config for {_s(str(a.get('arn', 'a resource')).split(':')[-1], 50)}"
+    if name == "noncompliant_resources":
+        return "Checking which of your resources fail AWS Config rules"
     if name == "get_team_overview":
         return "Loading your team's overview"
     if name == "search_findings":

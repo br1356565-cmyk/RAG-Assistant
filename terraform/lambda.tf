@@ -34,9 +34,13 @@ locals {
   })
 
   # With AgentCore on, chat forwards questions to the Runtime agent and releases review gates.
+  # The AWS read tools run behind the Gateway with AgentCore on; without it, in the chat Lambda.
   chat_agentcore_env = merge(local.agentcore_env, { for k, v in {
     AGENT_RUNTIME_URL = local.audit_runtime_url
     STATE_MACHINE_ARN = local.state_machine_arn
+    AWS_LOGS_TOOL     = var.aws_logs_tool_enabled ? "true" : null
+    AWS_CONFIG_TOOL   = var.aws_config_tool_enabled ? "true" : null
+    LOGS_MAX_HOURS    = tostring(var.logs_tool_max_hours)
   } : k => v if v != null })
   # Investigations use the Gateway tools but not memory, the fix agent or diagnostics.
   investigate_agentcore_env = { for k, v in local.agentcore_env : k => v
@@ -83,11 +87,14 @@ locals {
       in_vpc   = false # only calls GitHub/AWS APIs and writes to S3
       reserved = -1
       env = tomap(merge(local.github_env, local.collect_role_env, {
-        DATA_BUCKET            = aws_s3_bucket.data.bucket
-        OWNERSHIP_CONFIG       = var.ownership_config
-        TEAM_GROUP_IDS         = jsonencode(var.team_group_ids)
-        GUARDDUTY_REGIONS      = join(",", var.guardduty_regions)
-        GITHUB_MAX_RATE_WAIT_S = "300" # batch job with a 900 s timeout can afford to wait
+        DATA_BUCKET         = aws_s3_bucket.data.bucket
+        OWNERSHIP_CONFIG    = var.ownership_config
+        TEAM_GROUP_IDS      = jsonencode(var.team_group_ids)
+        GUARDDUTY_REGIONS   = join(",", var.guardduty_regions)
+        SECURITYHUB_REGIONS = join(",", var.securityhub_regions)
+        # GuardDuty findings also flow into Security Hub; don't report them twice.
+        SECURITYHUB_SKIP_PRODUCTS = contains(var.collectors, "guardduty") ? "GuardDuty" : ""
+        GITHUB_MAX_RATE_WAIT_S    = "300" # batch job with a 900 s timeout can afford to wait
       }))
     }
     notify = {

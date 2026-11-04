@@ -177,6 +177,7 @@ def out_of_scope_markers(scope: Scope) -> set[str]:
     for repo, team in REPOS.items():
         if team not in scope.team_ids:
             marks.add(repo)
+    marks |= aws_markers(scope)
     return {m for m in marks if m}
 
 
@@ -184,3 +185,84 @@ def owner_query(sql: str, params=()):
     with psycopg.connect(admin_dsn(DBNAME), autocommit=True) as c:
         cur = c.execute(sql, params or None)
         return cur.fetchall() if cur.description else []
+
+
+# ── AWS (logs and tagged resources) for the AWS tool cases ─────────────────
+LOG_GROUPS = {"/growth/api": ("growth_engineering", ["GET /checkout 502 upstream timeout", "GET /checkout 200",
+                                                     "ERROR payment provider timeout after 30s"]),
+              "/uk/payments": ("uk_engineering", ["card batch settled 4411 items", "ERROR card-format parse failure"]),
+              "/data/etl": ("data_engineering", ["job nightly-export finished in 42s"])}
+RESOURCES = {"arn:aws:s3:::growth-exports": "growth_engineering", "arn:aws:s3:::uk-statements": "uk_engineering",
+             "arn:aws:s3:::data-lake-raw": "data_engineering"}
+NONCOMPLIANT = {"growth-exports": ["s3-bucket-versioning-enabled"], "uk-statements": ["s3-bucket-public-read-prohibited"]}
+
+
+class _Pager:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def paginate(self, **kw):
+        return self.fn(**kw)
+
+
+class EvalLogs:
+    def __init__(self):
+        self._last = None
+
+    def get_paginator(self, name):
+        return _Pager(lambda **kw: [{"logGroups": [
+            {"logGroupName": g, "logGroupArn": f"arn:aws:logs:ap-southeast-2:1:log-group:{g}"} for g in LOG_GROUPS]}])
+
+    def list_tags_for_resource(self, resourceArn):
+        return {"tags": {"team": LOG_GROUPS[resourceArn.split(":log-group:")[1]][0]}}
+
+    def start_query(self, logGroupNames, **kw):
+        self._last = logGroupNames[0]
+        return {"queryId": "q"}
+
+    def get_query_results(self, queryId):
+        lines = LOG_GROUPS[self._last][1]
+        return {"status": "Complete", "statistics": {"bytesScanned": 1000},
+                "results": [[{"field": "@message", "value": m}] for m in lines]}
+
+    def stop_query(self, queryId):
+        pass
+
+
+class EvalTagging:
+    def get_paginator(self, name):
+        def pages(TagFilters, **kw):
+            wanted = TagFilters[0].get("Values")
+            return [{"ResourceTagMappingList": [{"ResourceARN": a, "Tags": [{"Key": "team", "Value": t}]}
+                                                for a, t in RESOURCES.items() if wanted is None or t in wanted]}]
+        return _Pager(pages)
+
+
+class EvalConfig:
+    def select_resource_config(self, Expression, Limit, NextToken=None):
+        if "ResourceCompliance" in Expression:
+            return {"Results": [json.dumps({"configuration": {"targetResourceId": rid, "targetResourceType": "AWS::S3::Bucket",
+                    "configRuleList": [{"configRuleName": r, "complianceType": "NON_COMPLIANT"} for r in rules]}})
+                    for rid, rules in NONCOMPLIANT.items()]}
+        arn = Expression.split("WHERE arn = '")[1].rstrip("'")
+        return {"Results": [json.dumps({"resourceId": arn.split(":")[-1], "resourceType": "AWS::S3::Bucket",
+                                        "configuration": {"versioning": "Off", "encryption": "AES256"}})]}
+
+
+def eval_aws():
+    from audit_agent.tools.aws_ops import AwsClients
+    return AwsClients(logs=EvalLogs(), tagging=EvalTagging(), config=EvalConfig())
+
+
+def aws_markers(scope: Scope) -> set[str]:
+    """Other teams' log groups, log lines and resources must not reach the answer."""
+    if scope.is_admin:
+        return set()
+    marks = set()
+    for g, (team, lines) in LOG_GROUPS.items():
+        if team not in scope.team_ids:
+            marks |= {g, *lines}
+    for arn, team in RESOURCES.items():
+        if team not in scope.team_ids:
+            marks |= {arn, arn.split(":")[-1]}
+    return marks

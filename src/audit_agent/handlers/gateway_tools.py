@@ -10,6 +10,8 @@ ownership checks in the tool, row-level security in the database.
 Targets:
   github_read  get_advisory, read_repo_file, search_code     (both agents)
   ops_read     list_instances, run_diagnostic                (audit agent)
+  aws_read     list_log_groups, query_logs, list_team_resources, describe_resource,
+               noncompliant_resources                        (audit agent)
   github_write open_fix_pr                                   (fix agent only; Policy + approval check)
 """
 from __future__ import annotations
@@ -30,7 +32,8 @@ from ..tools.base import REGISTRY, ToolContext, ToolError, tools_for
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-READ_TOOLS = {"get_advisory", "read_repo_file", "search_code", "list_instances", "run_diagnostic"}
+READ_TOOLS = {"get_advisory", "read_repo_file", "search_code", "list_instances", "run_diagnostic",
+              "list_log_groups", "query_logs", "list_team_resources", "describe_resource", "noncompliant_resources"}
 WRITE_TOOLS = {"open_fix_pr"}
 
 
@@ -49,7 +52,9 @@ def _env():
     github = GitHubApp(s.github_org, s.github_app_id, s.github_installation_id,
                        load_secret(s.github_private_key_secret, s.aws_region), owner_type=s.github_owner_type)
     ssm = SSMClients(boto3.client("ssm"), boto3.client("ec2")) if os.environ.get("DIAGNOSTICS_DOCUMENT") else None
-    return s, key, Database(s), github, ssm
+    from ..tools.aws_ops import AwsClients
+    ssm_aws = (ssm, AwsClients.from_env(s.aws_region))
+    return s, key, Database(s), github, ssm_aws
 
 
 def tool_name(context) -> str:
@@ -59,7 +64,8 @@ def tool_name(context) -> str:
 
 
 def handler(event: dict, context, env=None) -> dict:
-    s, key, db, github, ssm = env or _env()
+    s, key, db, github, clients = env or _env()
+    ssm, aws = clients if isinstance(clients, tuple) else (clients, None)
     name = tool_name(context)
     args = dict(event or {})
     token = args.pop("_scope", None)
@@ -73,13 +79,16 @@ def handler(event: dict, context, env=None) -> dict:
 
     try:
         if name in WRITE_TOOLS:
-            from fix_agent.github_write import open_fix_pr
-            out = open_fix_pr(db, scope, args.get("fix_request_id", ""), claims)
+            from fix_agent.github_write import WriteRefused, open_fix_pr
+            try:
+                out = open_fix_pr(db, scope, args.get("fix_request_id", ""), claims)
+            except WriteRefused as exc:            # a deliberate refusal: pass its reason on
+                return {"error": str(exc)}
             return {"data": out}
         if name not in READ_TOOLS or name not in REGISTRY:
             return {"error": f"unknown tool {name!r}"}
         tool = REGISTRY[name]
-        ctx = ToolContext(scope=scope, db=db, github=github, mode="remote", ssm=ssm)
+        ctx = ToolContext(scope=scope, db=db, github=github, mode="remote", ssm=ssm, aws=aws)
         result = tool.handler(ctx, tool.args_model.model_validate(args))
         return {"data": result.data, "finding_ids": sorted(result.finding_ids), "sources": sorted(result.sources)}
     except ToolError as exc:
