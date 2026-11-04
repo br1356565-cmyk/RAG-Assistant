@@ -92,7 +92,10 @@ def thread_dispatcher(deps, new_db):
 
         def work():
             try:
-                chat.run_job(payload["_job"], None, deps=job_deps)
+                if "_infra_job" in payload:
+                    chat.run_infra_job(payload["_infra_job"], None, deps=job_deps)
+                else:
+                    chat.run_job(payload["_job"], None, deps=job_deps)
             finally:
                 job_deps.db.close()
         threading.Thread(target=work, daemon=True).start()

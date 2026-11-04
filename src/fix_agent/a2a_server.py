@@ -18,6 +18,7 @@ from a2a.server.agent_execution import AgentExecutor
 
 from audit_agent.scope_token import ScopeTokenError, verify
 
+from .infra_service import InfraError
 from .service import FixError
 
 log = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ FP_RE = re.compile(r"^[0-9a-f]{16}$")
 UUID_RE = re.compile(r"^[0-9a-f-]{36}$")
 
 
-def handle(service, key: bytes, text: str) -> dict:
+def handle(service, key: bytes, text: str, infra=None) -> dict:
     try:
         msg = json.loads(text)
         scope, _ = verify(str(msg.get("scope_token", "")), key)
@@ -39,8 +40,16 @@ def handle(service, key: bytes, text: str) -> dict:
         if (msg.get("action") == "decide" and UUID_RE.match(str(msg.get("fix_request_id", "")))
                 and msg.get("decision") in ("approved", "rejected")):
             return service.resume(msg["fix_request_id"], msg["decision"], scope.user_id)
+        rid = str(msg.get("request_id", ""))
+        if infra is not None and UUID_RE.match(rid):
+            if msg.get("action") == "infra_start":
+                return infra.start(scope, rid)
+            if msg.get("action") == "infra_answer" and str(msg.get("answer", "")).strip():
+                return infra.answer(scope, rid, str(msg["answer"]))
+            if msg.get("action") == "infra_decide" and msg.get("decision") in ("approved", "rejected"):
+                return infra.resume(scope, rid, msg["decision"])
         return {"error": "unknown or malformed action"}
-    except FixError as exc:
+    except (FixError, InfraError) as exc:
         return {"error": str(exc)}
     except Exception:  # noqa: BLE001
         log.exception("fix agent action failed")
@@ -48,11 +57,11 @@ def handle(service, key: bytes, text: str) -> dict:
 
 
 class FixExecutor(AgentExecutor):
-    def __init__(self, service, key: bytes):
-        self.service, self.key = service, key
+    def __init__(self, service, key: bytes, infra=None):
+        self.service, self.key, self.infra = service, key, infra
 
     async def execute(self, context, event_queue) -> None:
-        result = await asyncio.to_thread(handle, self.service, self.key, context.get_user_input())
+        result = await asyncio.to_thread(handle, self.service, self.key, context.get_user_input(), self.infra)
         await event_queue.enqueue_event(new_text_message(
             json.dumps(result, default=str),
             context_id=getattr(context, "context_id", None), task_id=getattr(context, "task_id", None)))

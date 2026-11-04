@@ -20,14 +20,29 @@ class FixAgentError(RuntimeError):
 
 
 class LocalFixClient:
-    def __init__(self, service):
-        self.service = service
+    def __init__(self, service, infra=None):
+        self.service, self.infra = service, infra
 
     def request_fix(self, scope: Scope, fingerprint: str) -> dict:
         return self.service.draft(scope, fingerprint)
 
     def decide(self, scope: Scope, fix_request_id: str, decision: str) -> dict:
         return self.service.resume(fix_request_id, decision, scope.user_id)
+
+    # Terraform drafter
+    def infra_start(self, scope: Scope, request_id: str) -> dict:
+        return self._infra().start(scope, request_id)
+
+    def infra_answer(self, scope: Scope, request_id: str, answer: str) -> dict:
+        return self._infra().answer(scope, request_id, answer)
+
+    def infra_decide(self, scope: Scope, request_id: str, decision: str) -> dict:
+        return self._infra().resume(scope, request_id, decision)
+
+    def _infra(self):
+        if self.infra is None:
+            raise FixAgentError("the Terraform drafter is not configured here")
+        return self.infra
 
 
 class A2AFixClient:
@@ -36,7 +51,7 @@ class A2AFixClient:
         self.url, self._key, self._sign = url, key, signer
         self._http = http or httpx.Client(timeout=timeout_s)
 
-    def _send(self, scope: Scope, payload: dict) -> dict:
+    def _send(self, scope: Scope, payload: dict, timeout_s: float | None = None) -> dict:
         text = json.dumps({**payload, "scope_token": sign(scope, self._key)})
         body = json.dumps({"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "SendMessage", "params": {
             "message": {"messageId": str(uuid.uuid4()), "role": "ROLE_USER", "parts": [{"text": text}]}}}).encode()
@@ -44,7 +59,8 @@ class A2AFixClient:
                    "x-amzn-bedrock-agentcore-runtime-session-id": f"fix-{uuid.uuid4()}"}
         if self._sign:
             headers = self._sign("POST", self.url, headers, body)
-        r = self._http.post(self.url, content=body, headers=headers)
+        r = self._http.post(self.url, content=body, headers=headers,
+                            **({"timeout": timeout_s} if timeout_s else {}))
         if r.status_code >= 400:
             raise FixAgentError(f"fix agent HTTP {r.status_code}: {r.text[:200]}")
         msg = r.json()
@@ -63,6 +79,18 @@ class A2AFixClient:
 
     def decide(self, scope: Scope, fix_request_id: str, decision: str) -> dict:
         return self._send(scope, {"action": "decide", "fix_request_id": fix_request_id, "decision": decision})
+
+    # Terraform drafter: drafting runs a multi-tool agent, so allow minutes, not seconds.
+    def infra_start(self, scope: Scope, request_id: str) -> dict:
+        return self._send(scope, {"action": "infra_start", "request_id": request_id}, timeout_s=280)
+
+    def infra_answer(self, scope: Scope, request_id: str, answer: str) -> dict:
+        return self._send(scope, {"action": "infra_answer", "request_id": request_id, "answer": answer},
+                          timeout_s=280)
+
+    def infra_decide(self, scope: Scope, request_id: str, decision: str) -> dict:
+        return self._send(scope, {"action": "infra_decide", "request_id": request_id, "decision": decision},
+                          timeout_s=120)
 
 
 def _first_text(node) -> str | None:

@@ -526,3 +526,22 @@ variable "demo_aws_resources" {
   default     = false
   description = "Create a log group /demo/storefront (team web) with sample log lines, and an S3 bucket (team data) without versioning, so the logs and Config tools have something to find."
 }
+
+# ── Terraform drafter ─────────────────────────────────────────────────────────────────
+variable "infra_drafter_enabled" {
+  type        = bool
+  default     = false
+  description = "Team members describe infrastructure in the web app; the fix runtime drafts Terraform for a lead to approve and opens a PR on infra_repo. Needs agentcore_enabled and fix_agent_enabled, and the fix-bot GitHub App installed on infra_repo with contents and pull-request write."
+}
+
+variable "infra_repo" {
+  type        = string
+  default     = "demo-infra-terraform"
+  description = "The shared Terraform repo (in github_org) the drafter reads and opens PRs on. Drafts only ever touch teams/<team>/."
+}
+
+variable "infra_model" {
+  type        = string
+  default     = null
+  description = "Model for the drafter; null = chat_model."
+}

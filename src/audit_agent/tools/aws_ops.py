@@ -194,7 +194,7 @@ class ListResourcesArgs(Args):
 
 
 @tool("list_team_resources", "AWS resources tagged as your team's (ARN, name), optionally one service or type.",
-      ListResourcesArgs, {"chat"})
+      ListResourcesArgs, {"chat", "infra"})
 def list_team_resources(ctx: ToolContext, a: ListResourcesArgs) -> ToolResult:
     res = _team_resources(ctx, a.resource_type)
     return ToolResult({"resources": res[:100], "total": len(res),
@@ -209,7 +209,7 @@ class DescribeArgs(Args):
     "describe_resource",
     "Current configuration of one of your team's AWS resources from AWS Config (settings, tags, "
     "relationships). Use list_team_resources to find the ARN.",
-    DescribeArgs, {"chat"}, untrusted=True,
+    DescribeArgs, {"chat", "infra"}, untrusted=True,
 )
 def describe_resource(ctx: ToolContext, a: DescribeArgs) -> ToolResult:
     if a.arn not in {r["arn"] for r in _team_resources(ctx)}:

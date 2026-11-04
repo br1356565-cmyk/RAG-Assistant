@@ -14,15 +14,21 @@ EventBridge Scheduler (Mon 00:00 UTC)
        ReviewGate  waits (task token) until a team lead reviews every low-confidence investigation
        Notify      Slack run summary, including failures and review status
 CloudFront (+ optional WAF IP allowlist)
-  /       -> S3 web app (Entra ID sign-in, PKCE): brief, chat with live steps, Review panel
-  /api/*  -> chat Lambda function URL: auth, background chat jobs, review / feedback / fix API
+  /       -> S3 web app (Entra ID sign-in, PKCE): brief, chat with live steps, Review,
+             Infra requests, Conventions (sidebar, light/dark, keyboard shortcuts, phone layout)
+  /api/*  -> chat Lambda function URL: auth, background chat and drafter jobs, review / feedback
+             / fix / infra / conventions API
                -> AgentCore Runtime "audit" (HTTP, Entra JWT authorizer): the ReAct harness
                     memory  -> AgentCore Memory (per user, per session; optional long-term)
                     tools   -> in-process DB tools (row-level security)
                             -> AgentCore Gateway (MCP, IAM) + Policy (Cedar, default deny)
                                  -> tools Lambda: GitHub read, SSM diagnostics, CloudWatch Logs,
-                                    AWS Config, open approved fix PR
-                    fixes   -> AgentCore Runtime "fix" (A2A): LangGraph, interrupt for approval
+                                    AWS Config, infra repo read, open approved fix / infra PR
+                    fixes   -> AgentCore Runtime "fix" (A2A): two LangGraph graphs, each pausing
+                               (interrupt) for a lead's approval
+                                 fix agent        Dependabot finding -> manifest bump -> PR
+                                 Terraform drafter request -> conventions + history + infra repo
+                                                  + AWS -> reuse | new | refuse | ask -> PR
 RDS PostgreSQL: findings, owners, reviews, fix requests, checkpoints, audit log; isolation by RLS
 CloudWatch: metric filters on structured logs, dashboard, alarms; optional OTel traces
 ```
@@ -53,16 +59,18 @@ src/audit_agent/
   harness.py           the agent loop and its guarantees (citation check, confidence gate)
   verifier.py          scores an answer against the evidence (the confidence gate's judge)
   tools/               the agent's tools (findings, notes, GitHub, diagnostics, AWS logs and
-                       Config, request_fix)
+                       Config, request_fix, infra.py: the drafter's memory/repo/submit tools)
   scope_token.py       HMAC-signed caller scope for tools behind the Gateway
   gateway_client.py    MCP client for AgentCore Gateway (SigV4)
   handlers/            Lambda entry points: collect, ingest, investigate, chat (+ api.py:
                        reviews, feedback, fixes), review_gate, gateway_tools, notify, migrate
 src/fix_agent/         LangGraph fix agent: deterministic manifest edits, approval interrupt,
-                       the GitHub write tool (approved + content-hash bound), A2A server
+                       the GitHub write tool (approved + content-hash bound), A2A server;
+                       infra_graph.py / infra_service.py / infra_checks.py / infra_write.py:
+                       the Terraform drafter (same pattern, multi-file PR bound to a files hash)
 src/agent_main.py      AgentCore Runtime entry point (chat agent, streams steps)
-src/fix_main.py        AgentCore Runtime entry point (fix agent, A2A)
-web/                   static page (no dependencies)
+src/fix_main.py        AgentCore Runtime entry point (fix agent + drafter, A2A)
+web/                   static app (no dependencies, no build): sidebar views, light/dark, shortcuts
 terraform/             the whole stack, code included (agentcore.tf, diagnostics.tf, ...)
 evals/                 golden questions, replay + live scoring, fix-agent eval (CI gate)
 local/                 laptop prototype: docker-compose, run_weekly.py, dev_server.py
@@ -168,6 +176,8 @@ The next `terraform apply` moves it forward again.
 | Investigation in the brief | any team member | "This is wrong" → hidden from the brief, re-investigated next run |
 | Team note proposed by the agent | team lead / admin | Review panel → approve or reject |
 | Fix PR drafted by the fix agent | team lead / admin | Review panel shows the diff → "Approve and open PR" |
+| Terraform draft | team lead / admin | Infra requests shows reasoning, checks and diff → approve (PR with exactly those files) or reject with a reason |
+| Infra convention | team lead / admin | Conventions → approve or reject; rejected-draft reasons arrive here as proposals |
 | Chat answer | the asker | 👍 / 👎 with an optional comment (dashboard metric) |
 
 Who may decide is enforced by row-level security policies, not by the API code.
@@ -180,14 +190,17 @@ Who may decide is enforced by row-level security policies, not by the API code.
 | User preferences, summaries (long-term, optional) | AgentCore Memory strategies; recalled as context, never as evidence | AgentCore |
 | Investigation | `investigations` + append-only `investigation_reviews` | Investigate, leads |
 | Team knowledge | `team_notes` | Agent proposes; a team lead approves |
-| Fix agent state | LangGraph checkpoints in Postgres (survives the approval wait) | Fix agent |
+| Fix agent state | LangGraph checkpoints in Postgres (survives the approval wait) | Fix agent, drafter |
+| Infra conventions (long-term) | `infra_conventions`; only *active* ones are recalled | Anyone proposes (rejection reasons too); a lead activates |
+| Infra request history | `infra_requests` (full-text search over request, reasoning, rejection reason) | Drafter, requesters, leads |
 
 ## Evals
 
 ```
 python evals/run.py                  # replay: the CI gate (isolation 100%, grounding 100%)
-python evals/run.py --model live     # the same 34 questions with your real model (local/.env)
+python evals/run.py --model live     # the same 35 questions with your real model (local/.env)
 python evals/fix_eval.py             # manifest edits + draft -> approve -> PR
+python evals/infra_eval.py           # drafter: code checks on tricky Terraform, hard limits, approval binding
 ```
 
 ## Tests
@@ -204,3 +217,4 @@ TEST_PG_HOST=localhost TEST_PG_PORT=5432 pytest -q     # needs Postgres 15+, use
 - Token-by-token streaming of the answer text (steps stream; the answer arrives whole)
 - RDS certificate verification (`sslmode=require` encrypts but doesn't verify the server)
 - Fixes for ecosystems other than npm `package.json` and pip `requirements*.txt`
+- `terraform validate` / `plan` on drafts before review (the PR's own CI is where that runs)

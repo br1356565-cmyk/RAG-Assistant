@@ -90,6 +90,12 @@ enable_config_recorder  = false
 enable_securityhub      = false # then add "securityhub" to collectors
 demo_aws_resources      = true  # /demo/storefront log group (team web) + an unversioned bucket (team data)
 
+# Terraform drafter (Infra requests page). Opens PRs on infra_repo with the fix-bot App, so
+# that App must be installed on demo-infra-terraform with Contents + Pull requests: write.
+# Without aws_config_tool_enabled it still drafts, it just can't look up existing resources.
+infra_drafter_enabled = true
+infra_repo            = "demo-infra-terraform"
+
 # Spend guard.
 alarm_email        = "rameshbalaji256001@gmail.com"
 monthly_budget_usd = 30

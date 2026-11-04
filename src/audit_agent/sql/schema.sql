@@ -379,3 +379,96 @@ grant usage on all sequences in schema public to audit_app;
 
 grant select, insert, update, delete on all tables in schema public to audit_ingest;
 grant usage on all sequences in schema public to audit_ingest;
+
+-- ── Terraform drafter ──────────────────────────────────────────────────────
+-- Conventions are the drafter's long-term memory. Anyone in a team may PROPOSE one (and a
+-- rejected draft proposes one from the lead's reason); only a lead or admin activates it.
+-- team_id null = applies to every team (admins decide those).
+create table if not exists infra_conventions (
+  id          uuid primary key default gen_random_uuid(),
+  team_id     text references teams(id),
+  text        text not null check (length(text) between 5 and 500),
+  status      text not null default 'proposed' check (status in ('proposed','active','rejected')),
+  source      text not null default 'manual' check (source in ('manual','rejection','agent')),
+  author      text not null,
+  approver    text,
+  request_id  uuid,
+  created_at  timestamptz not null default now(),
+  decided_at  timestamptz
+);
+
+-- Every request is also searchable history: what was asked, what was decided, and why a
+-- lead rejected it. The drafter recalls similar past requests from here.
+create table if not exists infra_requests (
+  id              uuid primary key,
+  team_id         text not null references teams(id),
+  requested_by    text not null,
+  request         text not null check (length(request) between 10 and 2000),
+  status          text not null default 'drafting'
+                  check (status in ('drafting','needs_input','awaiting_approval','approved','rejected','opened','failed')),
+  decision        text check (decision in ('reuse','new','refuse')),
+  reasoning       text,
+  question        text,
+  answer          text,
+  files           jsonb not null default '[]',   -- [{"path", "content"}]
+  diff            text,
+  checks          jsonb not null default '[]',   -- [{"name", "ok", "detail"}]
+  steps           jsonb not null default '[]',   -- progress labels while drafting
+  approver        text,
+  decided_at      timestamptz,
+  approved_sha256 text,                          -- hash of files at approval; the PR must match it
+  reject_reason   text,
+  pr_url          text,
+  error           text,
+  thread_id       text not null,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now(),
+  search          tsvector generated always as (to_tsvector('english',
+                    coalesce(request, '') || ' ' || coalesce(reasoning, '') || ' ' || coalesce(reject_reason, ''))) stored
+);
+create index if not exists infra_requests_search on infra_requests using gin (search);
+create index if not exists infra_requests_team on infra_requests (team_id, created_at desc);
+
+alter table infra_conventions enable row level security; alter table infra_conventions force row level security;
+alter table infra_requests    enable row level security; alter table infra_requests    force row level security;
+
+drop policy if exists conventions_read on infra_conventions;
+create policy conventions_read on infra_conventions for select to audit_app using (
+  app_is_admin() or team_id is null or team_id = any (app_team_ids()));
+drop policy if exists conventions_propose on infra_conventions;
+create policy conventions_propose on infra_conventions for insert to audit_app with check (
+  status = 'proposed' and approver is null and author = app_user_id()
+  and (app_is_admin() or team_id = any (app_team_ids())));
+drop policy if exists conventions_decide on infra_conventions;
+create policy conventions_decide on infra_conventions for update to audit_app
+  using (app_is_admin() or (app_role() = 'team_lead' and team_id = any (app_team_ids())))
+  with check (approver = app_user_id() and status in ('active','rejected')
+              and (app_is_admin() or (app_role() = 'team_lead' and team_id = any (app_team_ids()))));
+
+drop policy if exists infra_read on infra_requests;
+create policy infra_read on infra_requests for select to audit_app using (
+  app_is_admin() or team_id = any (app_team_ids()));
+drop policy if exists infra_create on infra_requests;
+create policy infra_create on infra_requests for insert to audit_app with check (
+  team_id = any (app_team_ids()) and status = 'drafting' and approver is null and requested_by = app_user_id());
+drop policy if exists infra_update on infra_requests;
+create policy infra_update on infra_requests for update to audit_app
+  using (app_is_admin() or team_id = any (app_team_ids()))
+  with check (
+    (app_is_admin() or team_id = any (app_team_ids()))
+    and (status not in ('approved','rejected') or approver = app_user_id())
+    and (status not in ('approved','rejected') or app_is_admin() or app_role() = 'team_lead'));
+
+do $$
+declare t text;
+begin
+  foreach t in array array['infra_conventions','infra_requests'] loop
+    execute format('drop policy if exists ingest_all on %I', t);
+    execute format('create policy ingest_all on %I for all to audit_ingest using (true) with check (true)', t);
+  end loop;
+end $$;
+
+grant select, insert on infra_conventions to audit_app;
+grant update (status, approver, decided_at) on infra_conventions to audit_app;
+grant select, insert, update on infra_requests to audit_app;
+grant select, insert, update, delete on infra_conventions, infra_requests to audit_ingest;

@@ -41,8 +41,11 @@ UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 
 
 def handler(event: dict, context) -> dict:
-    if "_job" in event and "headers" not in event and "requestContext" not in event:
-        return run_job(event["_job"], context)
+    if "headers" not in event and "requestContext" not in event:      # internal background jobs
+        if "_job" in event:
+            return run_job(event["_job"], context)
+        if "_infra_job" in event:
+            return run_infra_job(event["_infra_job"], context)
 
     deps = get_deps()
     try:
@@ -60,7 +63,7 @@ def handler(event: dict, context) -> dict:
     route = api.ROUTES.get((method, path.split("/api/", 1)[-1] if "/api/" in path else ""))
     if route is not None:
         try:
-            body = _json_body(event) if method == "POST" else {}
+            body = _json_body(event) if method == "POST" else dict(event.get("queryStringParameters") or {})
         except (ValueError, json.JSONDecodeError) as exc:
             return _resp(400, {"error": str(exc)})
         status, out = route(deps, scope, body)
@@ -179,6 +182,31 @@ def run_job(job: dict, context, deps: Deps | None = None) -> dict:
         conn.execute("update chat_jobs set status = %s, result = %s, updated_at = now() where id = %s",
                      (status, json.dumps(body, default=str), job_id))
     return {"job_id": job_id, "status": status}
+
+
+def run_infra_job(job: dict, context, deps: Deps | None = None) -> dict:
+    """Background half of a Terraform draft: the drafter runs (minutes, many tool calls) while
+    the page polls the request row for its steps."""
+    deps = deps or get_deps()
+    s = job["scope"]
+    scope = Scope(user_id=s["user_id"], team_ids=tuple(s["team_ids"]), role=s["role"])
+    rid = job["request_id"]
+    try:
+        if job["action"] == "answer":
+            out = deps.fix_client.infra_answer(scope, rid, job["answer"])
+        else:
+            out = deps.fix_client.infra_start(scope, rid)
+        if out.get("error"):
+            raise RuntimeError(out["error"])
+        log.info(json.dumps({"event": "infra_job", "request": rid, "status": out.get("status"),
+                             "decision": out.get("decision")}))
+        return out
+    except Exception as exc:  # noqa: BLE001 - the page must learn the draft ended
+        log.exception("infra job %s failed", rid)
+        with deps.db.scoped(scope) as conn:
+            conn.execute("update infra_requests set status = 'failed', error = %s, updated_at = now() "
+                         "where id = %s and status in ('drafting','needs_input')", (str(exc)[:500], rid))
+        return {"request_id": rid, "status": "failed", "error": str(exc)[:300]}
 
 
 def _via_runtime(deps: Deps, job: dict, on_step) -> dict:

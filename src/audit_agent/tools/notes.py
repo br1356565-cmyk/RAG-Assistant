@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from .base import Args, ToolContext, ToolError, ToolResult, parse_ref, tool
+from .base import ToolContext, ToolError, ToolResult, parse_ref, tool
 from .findings import TeamArg
 
 MAX_ACCEPTED_RISK_DAYS = 180

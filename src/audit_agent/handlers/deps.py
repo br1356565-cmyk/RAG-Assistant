@@ -70,6 +70,8 @@ DEFAULT_GATEWAY_TOOLS = {"get_advisory": "gh-advisory___get_advisory", "read_rep
 DIAGNOSTIC_GATEWAY_TOOLS = {"list_instances": "ops-instances___list_instances",
                             "run_diagnostic": "ops-diagnostic___run_diagnostic"}
 LOG_GATEWAY_TOOLS = {"list_log_groups": "aws-log-groups___list_log_groups", "query_logs": "aws-logs-query___query_logs"}
+INFRA_GATEWAY_TOOLS = {"list_infra_files": "gh-infra-list___list_infra_files",
+                       "read_infra_file": "gh-infra-read___read_infra_file"}
 CONFIG_GATEWAY_TOOLS = {"list_team_resources": "aws-resources___list_team_resources",
                         "describe_resource": "aws-config-describe___describe_resource",
                         "noncompliant_resources": "aws-config-compliance___noncompliant_resources"}
@@ -89,9 +91,13 @@ def gateway_tool_names(include_write: bool = False) -> dict[str, str]:
             names |= LOG_GATEWAY_TOOLS
         if os.environ.get("AWS_CONFIG_TOOL") == "true":
             names |= CONFIG_GATEWAY_TOOLS
+        if os.environ.get("INFRA_DRAFTER") == "true":
+            names |= INFRA_GATEWAY_TOOLS
+            names["open_infra_pr"] = "gh-write-infra___open_infra_pr"
         names["open_fix_pr"] = "gh-write___open_fix_pr"
     if not include_write:
         names.pop("open_fix_pr", None)
+        names.pop("open_infra_pr", None)
     return names
 
 

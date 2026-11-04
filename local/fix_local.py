@@ -55,6 +55,18 @@ class LockedFixClient:
         with self._lock:
             return self._client.request_fix(scope, fingerprint)
 
+    def infra_start(self, scope, request_id):
+        with self._lock:
+            return self._client.infra_start(scope, request_id)
+
+    def infra_answer(self, scope, request_id, answer):
+        with self._lock:
+            return self._client.infra_answer(scope, request_id, answer)
+
+    def infra_decide(self, scope, request_id, decision):
+        with self._lock:
+            return self._client.infra_decide(scope, request_id, decision)
+
     def decide(self, scope, fix_request_id, decision):
         with self._lock:
             return self._client.decide(scope, fix_request_id, decision)
@@ -85,4 +97,24 @@ def build_fix_client(github, llm=None, model: str = "", out: pathlib.Path | None
     deps = FixDeps(db=db, read_file=read_file, open_pr=lambda scope, fid: open_fix_pr(db, scope, fid, writer=writer),
                    llm=llm, model=model)
     saver = PostgresSaver(Database(dsn=env("AUDIT_DB_APP_DSN")).conn)
-    return LockedFixClient(LocalFixClient(FixService(deps, saver))), ("github" if token else f"dry run to {out or OUT}")
+    infra = build_infra(db, github, llm, model, writer, saver)
+    return (LockedFixClient(LocalFixClient(FixService(deps, saver), infra)),
+            ("github" if token else f"dry run to {out or OUT}"))
+
+
+def build_infra(db, github, llm, model, writer, saver, aws=None):
+    """The Terraform drafter in-process: repo and AWS tools run directly (no Gateway)."""
+    from types import SimpleNamespace
+
+    from audit_agent.tools import tools_for
+    from fix_agent.infra_graph import InfraDeps
+    from fix_agent.infra_service import InfraService
+    from fix_agent.infra_write import open_infra_pr
+
+    repo = os.environ.get("INFRA_REPO", "demo-infra-terraform")
+    tool_deps = SimpleNamespace(gateway=None, aws=aws, ssm=None, fix_client=None)
+    deps = InfraDeps(db=db, tools=lambda: tools_for("infra", tool_deps), llm_for=lambda teams: llm, model=model,
+                     read_infra=lambda scope, path: github.read_file(repo, path),
+                     open_pr=lambda scope, rid: open_infra_pr(db, scope, rid, writer=writer, repo=repo),
+                     repo=repo, github=github, aws=aws)
+    return InfraService(deps, saver)

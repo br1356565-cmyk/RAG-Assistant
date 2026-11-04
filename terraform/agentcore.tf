@@ -19,8 +19,9 @@
 # decides which agent may call which tool.
 
 locals {
-  agentcore = var.agentcore_enabled
-  ac_name   = replace(local.name, "-", "_") # Runtime, Memory and Policy names allow letters, digits and _
+  agentcore     = var.agentcore_enabled
+  infra_drafter = var.agentcore_enabled && var.fix_agent_enabled && var.infra_drafter_enabled
+  ac_name       = replace(local.name, "-", "_") # Runtime, Memory and Policy names allow letters, digits and _
 
   # One Gateway target per tool. The Gateway names tools "<target>___<tool>". Every entry has
   # the same shape (props as JSON) so the filtered result is a proper map for for_each.
@@ -85,14 +86,14 @@ locals {
       enabled     = var.aws_config_tool_enabled
       tool        = "list_team_resources"
       description = "AWS resources tagged for the caller's team."
-      callers     = "chat"
+      callers     = "chat+infra"
       props       = jsonencode([{ name = "resource_type", description = "Optional service or service:type", required = false }])
     }
     aws-config-describe = {
       enabled     = var.aws_config_tool_enabled
       tool        = "describe_resource"
       description = "AWS Config record of one of the caller's team resources."
-      callers     = "chat"
+      callers     = "chat+infra"
       props       = jsonencode([{ name = "arn", description = "Resource ARN", required = true }])
     }
     aws-config-compliance = {
@@ -108,6 +109,29 @@ locals {
       description = "Open a pull request for a fix request a team lead approved. Refuses anything else."
       callers     = "fix"
       props       = jsonencode([{ name = "fix_request_id", description = "Approved fix request id", required = true }])
+    }
+    # Terraform drafter (runs in the fix runtime). The infra repo is configuration
+    # (INFRA_REPO), never a tool argument, so the model can't point these at another repo.
+    gh-infra-list = {
+      enabled     = local.infra_drafter
+      tool        = "list_infra_files"
+      description = "List a folder of the shared Terraform repo."
+      callers     = "infra"
+      props       = jsonencode([{ name = "path", description = "Folder, e.g. '' (top), modules, teams/web", required = false }])
+    }
+    gh-infra-read = {
+      enabled     = local.infra_drafter
+      tool        = "read_infra_file"
+      description = "Read a file from the shared Terraform repo."
+      callers     = "infra"
+      props       = jsonencode([{ name = "path", description = "File path, e.g. modules/s3/variables.tf", required = true }])
+    }
+    gh-write-infra = {
+      enabled     = local.infra_drafter
+      tool        = "open_infra_pr"
+      description = "Open a pull request for an infra request a team lead approved, with exactly the approved files. Refuses anything else."
+      callers     = "infra"
+      props       = jsonencode([{ name = "request_id", description = "Approved infra request id", required = true }])
     }
   }
   tool_targets  = { for k, v in local.all_tool_targets : k => v if v.enabled }
@@ -401,7 +425,11 @@ resource "aws_bedrockagentcore_agent_runtime" "fix" {
     GATEWAY_MCP_URL     = aws_bedrockagentcore_gateway.tools[0].gateway_url
     GATEWAY_TOOLS       = jsonencode(local.gateway_tools)
     SCOPE_KEY_SECRET    = aws_secretsmanager_secret.scope_key[0].arn
-  })
+    }, { for k, v in {
+      INFRA_DRAFTER = local.infra_drafter ? "true" : null
+      INFRA_REPO    = local.infra_drafter ? var.infra_repo : null
+      INFRA_MODEL   = local.infra_drafter ? coalesce(var.infra_model, var.chat_model) : null
+  } : k => v if v != null })
 
   depends_on = [aws_iam_role_policy.runtime]
 }
@@ -565,12 +593,17 @@ locals {
     ops_tools = {
       description = "Only the chat agent may use server diagnostics and the AWS read tools"
       callers     = tolist([for c in flatten([local.role_session.chat, local.role_session.audit_runtime]) : c])
-      targets     = tolist([for t, v in local.tool_targets : t if v.callers == "chat"])
+      targets     = tolist([for t, v in local.tool_targets : t if contains(["chat", "chat+infra"], v.callers)])
     }
     fix_tools = {
       description = "Only the fix agent may read the manifest and open an approved fix PR"
       callers     = tolist([for c in try(local.role_session.fix_runtime, []) : c])
       targets     = tolist([for t, v in local.tool_targets : t if contains(["fix", "read+fix"], v.callers)])
+    }
+    infra_tools = {
+      description = "Only the Terraform drafter (fix runtime) may read the infra repo, look up team resources and open an approved infra PR"
+      callers     = tolist([for c in try(local.role_session.fix_runtime, []) : c])
+      targets     = tolist([for t, v in local.tool_targets : t if contains(["infra", "chat+infra"], v.callers)])
     }
   } : name => p if local.agentcore && length(p.targets) > 0 && length(p.callers) > 0 }
 }
@@ -612,6 +645,7 @@ locals {
     AWS_LOGS_TOOL          = tostring(var.aws_logs_tool_enabled)
     AWS_CONFIG_TOOL        = tostring(var.aws_config_tool_enabled)
     LOGS_MAX_HOURS         = tostring(var.logs_tool_max_hours)
+    INFRA_REPO             = var.infra_repo
     }, { for k, v in {
       FIX_GITHUB_APP_ID             = var.fix_github_app_id
       FIX_GITHUB_INSTALLATION_ID    = var.fix_github_installation_id

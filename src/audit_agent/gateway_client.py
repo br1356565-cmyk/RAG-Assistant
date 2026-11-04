@@ -12,7 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
-from typing import Any, Callable
+from typing import Callable
 
 import httpx
 

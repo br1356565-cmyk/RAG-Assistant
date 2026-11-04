@@ -32,6 +32,7 @@ class GitHubClient(Protocol):
 
     def advisory(self, ghsa_id: str) -> dict | None: ...
     def read_file(self, repo: str, path: str) -> str | None: ...
+    def list_dir(self, repo: str, path: str) -> list[dict] | None: ...
     def search_code(self, repo: str, query: str, limit: int) -> list[dict]: ...
 
 
@@ -191,6 +192,13 @@ class GitHubApp:
 
     def advisory(self, ghsa_id: str) -> dict | None:
         return self._get(f"/advisories/{ghsa_id}")
+
+    def list_dir(self, repo: str, path: str) -> list[dict] | None:
+        """Entries of a directory on the default branch: [{"name", "path", "type": "file"|"dir", "size"}]."""
+        data = self._get(f"/repos/{self.org}/{repo}/contents/{path.strip('/')}")
+        if not isinstance(data, list):
+            return None
+        return [{"name": e.get("name"), "path": e.get("path"), "type": e.get("type"), "size": e.get("size")} for e in data]
 
     def read_file(self, repo: str, path: str) -> str | None:
         data = self._get(f"/repos/{self.org}/{repo}/contents/{path}")

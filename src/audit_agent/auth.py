@@ -11,7 +11,6 @@ rejected with a clear 403 either way.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 
 import jwt
 

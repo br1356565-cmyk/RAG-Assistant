@@ -33,8 +33,9 @@ log = logging.getLogger()
 log.setLevel(logging.INFO)
 
 READ_TOOLS = {"get_advisory", "read_repo_file", "search_code", "list_instances", "run_diagnostic",
-              "list_log_groups", "query_logs", "list_team_resources", "describe_resource", "noncompliant_resources"}
-WRITE_TOOLS = {"open_fix_pr"}
+              "list_log_groups", "query_logs", "list_team_resources", "describe_resource", "noncompliant_resources",
+              "list_infra_files", "read_infra_file"}
+WRITE_TOOLS = {"open_fix_pr", "open_infra_pr"}
 
 
 @dataclass
@@ -80,8 +81,12 @@ def handler(event: dict, context, env=None) -> dict:
     try:
         if name in WRITE_TOOLS:
             from fix_agent.github_write import WriteRefused, open_fix_pr
+            from fix_agent.infra_write import open_infra_pr
             try:
-                out = open_fix_pr(db, scope, args.get("fix_request_id", ""), claims)
+                if name == "open_infra_pr":
+                    out = open_infra_pr(db, scope, str(args.get("request_id", "")))
+                else:
+                    out = open_fix_pr(db, scope, args.get("fix_request_id", ""), claims)
             except WriteRefused as exc:            # a deliberate refusal: pass its reason on
                 return {"error": str(exc)}
             return {"data": out}

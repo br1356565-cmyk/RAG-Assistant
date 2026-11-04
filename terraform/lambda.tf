@@ -41,6 +41,7 @@ locals {
     AWS_LOGS_TOOL     = var.aws_logs_tool_enabled ? "true" : null
     AWS_CONFIG_TOOL   = var.aws_config_tool_enabled ? "true" : null
     LOGS_MAX_HOURS    = tostring(var.logs_tool_max_hours)
+    INFRA_DRAFTER     = local.infra_drafter ? "true" : null
   } : k => v if v != null })
   # Investigations use the Gateway tools but not memory, the fix agent or diagnostics.
   investigate_agentcore_env = { for k, v in local.agentcore_env : k => v
@@ -52,8 +53,11 @@ locals {
 
   functions = tomap({
     chat = {
-      handler  = "audit_agent.handlers.chat.handler"
-      timeout  = 55 # stays under CloudFront's 60 s origin read timeout
+      handler = "audit_agent.handlers.chat.handler"
+      # Requests through CloudFront are cut at 60 s anyway and return quickly (CHAT_ASYNC); the
+      # longer timeout is for the self-invoked background jobs, the slowest being a Terraform
+      # draft (the drafter's own deadline is 150 s, plus the A2A round trip).
+      timeout  = local.infra_drafter ? 300 : 55
       memory   = 512
       in_vpc   = true
       reserved = var.chat_reserved_concurrency

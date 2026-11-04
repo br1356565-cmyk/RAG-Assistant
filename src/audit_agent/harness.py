@@ -124,7 +124,7 @@ class Harness:
             messages.append(resp.as_message())
 
             if not resp.tool_calls:
-                if self.cfg.mode == "investigate":
+                if self.terminal:          # modes that must end with a submit tool
                     if nudged_submit:
                         break
                     nudged_submit = True
@@ -293,7 +293,7 @@ class Harness:
     def _finalize(self, ctx: ToolContext, messages: list[dict], res: RunResult) -> RunResult:
         """Rounds, time or tokens ran out. Ask once for a best-effort ending."""
         res.finding_ids |= ctx.retrieved_findings
-        if self.cfg.mode == "investigate" and self.terminal:
+        if self.terminal:
             messages.append(_harness_msg(f"Out of budget. Call {self.terminal} now with what you have; "
                                          "use confidence 'low' if evidence is thin."))
             resp = self._call_model(ctx, messages, res,

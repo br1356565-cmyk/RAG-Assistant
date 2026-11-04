@@ -69,7 +69,7 @@ jobs:
           TEST_PG_PORT: "5432"
           PYTHONPATH: src:tests
       - name: Eval gate (isolation, grounding, confidence gate, fix agent)
-        run: python evals/run.py && python evals/fix_eval.py
+        run: python evals/run.py && python evals/fix_eval.py && python evals/infra_eval.py
         env:
           EVAL_PG_HOST: localhost
           EVAL_PG_PORT: "5432"

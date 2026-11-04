@@ -235,6 +235,12 @@ policy engine. Before the first apply:
    account already has a recorder in this region). `enable_securityhub = true` plus
    `"securityhub"` in `collectors` adds Security Hub findings to the weekly run. Config and
    Security Hub are billed per change / check and may not be allowed on a Free-plan account.
+8. **Terraform drafter:** `infra_drafter_enabled = true` (with `fix_agent_enabled`) adds the
+   **Infra requests** and **Conventions** pages. Drafts are opened as PRs on `infra_repo`
+   (default `demo-infra-terraform`) by the fix-bot App, so install that App on
+   `demo-infra-terraform` too, with **Contents** and **Pull requests: Read and write**.
+   Re-run the seed workflow once so the repo has `modules/` and `teams/`. Without the App,
+   drafting and approval work; opening the PR fails with a clear message.
 
 **Demo script for review and fixes**
 - As **asha** (member): open a critical Dependabot item in the brief → **Draft a fix**. The
@@ -245,6 +251,10 @@ policy engine. Before the first apply:
   shows up in the lead's Review panel; the next weekly run re-investigates it.
 - Ask something the data can't support ("will upgrading break our build?"). The page shows
   the agent going back for evidence, then a "not fully sure" note listing what it couldn't verify.
+- As a **web member**: **Infra requests** → "A private bucket for marketing banners, delete
+  after 90 days". Watch the steps; the draft lands in `teams/web/` with the checks beside it.
+  As the **team lead**: approve (a PR opens) or reject with a reason (it becomes a proposed
+  convention under **Conventions**). More cases: `local/demo-repos/SCENARIOS.md` §9.
 - `terraform output -raw dashboard_url`: questions, low-confidence rate, latency, feedback,
   tokens, review queue, Gateway refusals.
 
