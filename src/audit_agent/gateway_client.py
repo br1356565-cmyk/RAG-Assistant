@@ -21,7 +21,9 @@ from .scope_token import sign
 
 log = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = "2025-06-18"
+# MCP protocol version. AgentCore Gateway (MCP) supports 2025-03-26 by default; if a gateway
+# refuses it, the client retries once with a version from the gateway's "supported" list.
+PROTOCOL_VERSION = "2025-03-26"
 SCOPE_ARG = "_scope"
 
 
@@ -59,18 +61,19 @@ class GatewayClient:
         self._ids = itertools.count(1)
         self._session_id: str | None = None
         self._initialized = False
+        self._version = PROTOCOL_VERSION
 
     def _post(self, payload: dict) -> dict | None:
         body = json.dumps(payload).encode()
         headers = {"content-type": "application/json", "accept": "application/json, text/event-stream",
-                   "mcp-protocol-version": PROTOCOL_VERSION}
+                   "mcp-protocol-version": self._version}
         if self._session_id:
             headers["mcp-session-id"] = self._session_id
         if self._sign:
             headers = self._sign("POST", self.url, headers, body)
         r = self._http.post(self.url, content=body, headers=headers)
         if r.status_code >= 400:
-            raise GatewayError(f"gateway HTTP {r.status_code}: {r.text[:300]}")
+            raise GatewayError(f"gateway HTTP {r.status_code}: {r.text[:300]}", _supported_versions(r))
         self._session_id = r.headers.get("mcp-session-id", self._session_id)
         if "id" not in payload:          # a notification: no response body expected
             return None
@@ -79,11 +82,24 @@ class GatewayClient:
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        self._post({"jsonrpc": "2.0", "id": next(self._ids), "method": "initialize", "params": {
-            "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-            "clientInfo": {"name": "devops-audit-agent", "version": "2"}}})
+        try:
+            reply = self._initialize()
+        except GatewayError as exc:
+            supported = exc.args[1] if len(exc.args) > 1 else []
+            if not supported or self._version in supported:
+                raise
+            log.info("gateway refused MCP %s; retrying with %s", self._version, max(supported))
+            self._version = max(supported)          # ISO dates: the newest sorts last
+            reply = self._initialize()
+        # The server may answer with a different version; later requests must use that one.
+        self._version = ((reply or {}).get("result") or {}).get("protocolVersion") or self._version
         self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
         self._initialized = True
+
+    def _initialize(self) -> dict | None:
+        return self._post({"jsonrpc": "2.0", "id": next(self._ids), "method": "initialize", "params": {
+            "protocolVersion": self._version, "capabilities": {},
+            "clientInfo": {"name": "devops-audit-agent", "version": "2"}}})
 
     def call(self, local_name: str, arguments: dict, scope: Scope, **token_extra) -> dict:
         """-> the tool Lambda's JSON result: {"data", "finding_ids", "sources"} or {"error"}."""
@@ -103,6 +119,15 @@ class GatewayClient:
             return json.loads(text)
         except json.JSONDecodeError:
             return {"data": text}
+
+
+def _supported_versions(r: httpx.Response) -> list[str]:
+    """The versions a gateway lists when it refuses ours: error.data.supported."""
+    try:
+        data = (r.json().get("error") or {}).get("data") or {}
+        return [str(v) for v in data.get("supported") or []]
+    except Exception:  # noqa: BLE001 - not JSON
+        return []
 
 
 def _parse_response(r: httpx.Response) -> dict:

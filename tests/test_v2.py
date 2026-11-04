@@ -548,3 +548,40 @@ def test_a2a_server_accepts_requests_without_a_version_header(db, fix_service):
     fixed = TestClient(build_a2a_app(FixExecutor(service, KEY), context_builder=context_builder()))
     out = fixed.post("/", json=body).json()
     assert "error" not in out and "awaiting_approval" in json.dumps(out)
+
+
+def test_gateway_client_negotiates_the_mcp_version(db):
+    """A gateway that refuses our MCP version and lists what it supports gets a retry."""
+    from audit_agent.gateway_client import GatewayClient
+    seen = []
+
+    def handle(req: httpx.Request):
+        body = json.loads(req.content)
+        seen.append((body.get("method"), req.headers.get("mcp-protocol-version")))
+        if body["method"] == "initialize":
+            asked = body["params"]["protocolVersion"]
+            if asked != "2024-11-05":     # this gateway only speaks an older version
+                return httpx.Response(400, json={"jsonrpc": "2.0", "id": body["id"], "error": {
+                    "code": -32600, "message": f"Unsupported protocol version: {asked}",
+                    "data": {"requested": asked, "supported": ["2024-11-05"]}}})
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"],
+                                             "result": {"protocolVersion": "2024-11-05"}})
+        if body["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
+            "content": [{"type": "text", "text": json.dumps({"data": {"ok": True}})}]}})
+
+    gw = GatewayClient("https://gw/mcp", {"get_advisory": "gh-advisory___get_advisory"}, KEY,
+                       http=httpx.Client(transport=httpx.MockTransport(handle)))
+    assert gw.call("get_advisory", {"ghsa_id": GHSA}, GROWTH) == {"data": {"ok": True}}
+    assert seen[0] == ("initialize", "2025-03-26")                  # our default first
+    assert seen[1] == ("initialize", "2024-11-05")                  # then what the gateway listed
+    assert seen[-1] == ("tools/call", "2024-11-05")                 # and it sticks
+
+
+def test_gateway_client_gives_up_without_a_supported_list(db):
+    from audit_agent.gateway_client import GatewayClient, GatewayError
+    gw = GatewayClient("https://gw/mcp", {"get_advisory": "gh-advisory___get_advisory"}, KEY,
+                       http=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(400, text="nope"))))
+    with pytest.raises(GatewayError, match="HTTP 400"):
+        gw.call("get_advisory", {"ghsa_id": GHSA}, GROWTH)
