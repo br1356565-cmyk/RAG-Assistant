@@ -72,8 +72,8 @@ agentcore_tracing          = false # needs CloudWatch Transaction Search turned 
 # Fix agent: a second GitHub App with write access, used only for approved fix PRs.
 # Until it exists, fixes can be drafted and approved but no PR is opened.
 fix_agent_enabled          = true
-fix_github_app_id          = null # the fix-bot App ID, as a string
-fix_github_installation_id = null # its installation ID, as a string
+fix_github_app_id          = "5594367" # the fix-bot App ID, as a string
+fix_github_installation_id =  "178167841" # its installation ID, as a string
 
 # Server diagnostics through SSM (read-only checks); off for now.
 diagnostics_enabled = false
