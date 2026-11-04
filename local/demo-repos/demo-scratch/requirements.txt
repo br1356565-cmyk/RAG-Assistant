@@ -1,0 +1,2 @@
+# scratch experiments, nobody owns this
+requests==2.19.1

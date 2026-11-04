@@ -1,0 +1,4 @@
+# ETL jobs (demo). Intentionally outdated pins.
+PyYAML==5.3          # job configs uploaded by analysts
+requests==2.19.1     # partner API pulls (authenticated)
+urllib3==1.23        # pinned for requests (needs <1.24); not imported directly

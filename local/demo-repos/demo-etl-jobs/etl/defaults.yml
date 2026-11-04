@@ -1,0 +1,2 @@
+batch_size: 500
+retries: 3

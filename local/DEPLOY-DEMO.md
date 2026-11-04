@@ -72,8 +72,10 @@ A free Azure account comes with an Entra ID tenant (portal.azure.com → Microso
 
 ## 4. GitHub App and demo repos (20 min)
 
-1. **Seed the repos.** This creates four private repos with intentionally outdated
-   dependencies and turns on Dependabot alerts, which appear within a few minutes.
+1. **Seed the repos.** This creates (or, if they exist, updates) four private repos with
+   deliberately vulnerable code and outdated dependencies from `local/demo-repos/`, and turns
+   on Dependabot alerts, which appear within a few minutes. `local/demo-repos/SCENARIOS.md`
+   lists what to try with each agent and what should happen.
    - **From Actions:** create a fine-grained personal access token (Settings → Developer
      settings → Fine-grained tokens). Set it to all repositories, Administration: Read and
      write, Contents: Read and write, and a 7-day expiry. Save it as the repository secret
