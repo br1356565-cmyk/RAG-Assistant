@@ -1,12 +1,7 @@
 name: devops-audit-agent
 
 on:
-  pull_request:
-    paths: ["src/**", "tests/**", "web/**", "terraform/**", "requirements.txt"]
-  push:
-    branches: [main]
-    paths: ["src/**", "web/**", "terraform/**", "requirements.txt"]
-  workflow_dispatch:
+  workflow_dispatch: # manual only while the demo stack is the one being deployed
 
 permissions:
   contents: read
@@ -32,11 +27,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pytest boto3
+      - run: pip install -r requirements-runtime.txt pytest
       - run: pytest -q
         env:
           TEST_PG_HOST: localhost
           TEST_PG_PORT: "5432"
+          PYTHONPATH: src:tests
+      - name: Eval gate (isolation, grounding, confidence gate, fix agent)
+        run: python evals/run.py && python evals/fix_eval.py
+        env:
+          EVAL_PG_HOST: localhost
+          EVAL_PG_PORT: "5432"
+          PYTHONPATH: src
 
   terraform:
     needs: test

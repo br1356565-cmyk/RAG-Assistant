@@ -1,14 +1,19 @@
 terraform {
-  required_version = ">= 1.6"
+  # 1.11+: write-only secret values (the scope-token key never enters state)
+  required_version = ">= 1.11"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 5.80, < 7.0"
+      version = ">= 6.20, < 7.0" # Bedrock AgentCore resources
     }
     archive = {
       source  = "hashicorp/archive"
       version = "~> 2.4"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.7" # ephemeral random_password
     }
   }
 }

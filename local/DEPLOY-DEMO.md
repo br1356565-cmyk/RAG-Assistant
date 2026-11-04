@@ -113,7 +113,7 @@ A free Azure account comes with an Entra ID tenant (portal.azure.com → Microso
 | Kind | Name | Value |
 |---|---|---|
 | Variable | `AUDIT_AGENT_DEMO` | `true`, so the company `deploy.yml` only runs tests here |
-| Secret | `DEMO_TFVARS` | The whole of your filled-in `demo.tfvars`: copy `terraform/demo.tfvars.example`, replace every `<...>`, paste it in |
+| File or secret | `terraform/terraform.tfvars` (committed) or the `DEMO_TFVARS` secret | Your filled-in variables: copy `terraform/demo.tfvars.example` to `terraform/terraform.tfvars` and replace every `<...>`. The secret wins if both exist; use it instead of committing if the repo is public and you don't want the email and Entra IDs in it |
 | Secret | `GH_APP_PRIVATE_KEY` | The contents of the GitHub App `.pem` file, including the BEGIN/END lines |
 | Secret | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Unless you use `AWS_ROLE_ARN` |
 | Variable (optional) | `AWS_REGION`, `TF_STATE_BUCKET` | Defaults: `us-east-1`, `audit-demo-tfstate-<account id>` |
@@ -122,7 +122,7 @@ A free Azure account comes with an Entra ID tenant (portal.azure.com → Microso
 
 1. `action = plan` first. It runs the tests, creates the state bucket on the first run and
    shows `Plan: N to add` in the run summary. Expect around 80 resources.
-2. `action = apply`, with **run_collection** ticked. It deploys (about 15 minutes),
+2. Every push to `main` now tests, runs the eval gate and applies (pushes touching only docs or `local/` are skipped). For the first deploy you can also run it by hand: `action = apply`, with **run_collection** ticked. It deploys (about 15 minutes),
    uploads the GitHub App key to Secrets Manager and starts the first collection run. The
    run summary shows the web URL and the Entra redirect URI.
 3. Continue at step 6, items 1 and 2. The key upload and first run are already done.
@@ -195,6 +195,48 @@ paid account plan; on the Free plan it draws from credits, which is cents for a 
 Settings → **Generate sample findings**. Add `"guardduty"` to `collectors` and apply.
 Sample findings go to the platform team.
 
+## 6b. AgentCore, human review and the fix agent
+
+With `agentcore_enabled = true` (the default) the same apply also creates two AgentCore
+Runtimes (chat agent, fix agent), Memory, a Gateway with one target per tool, and a Cedar
+policy engine. Before the first apply:
+
+1. **Region:** check that Bedrock AgentCore (Runtime, Gateway, Memory and Policy) is offered
+   in your region in the console. If something is missing there, set
+   `agentcore_enabled = false`: everything else, including human review, still works, with
+   tools in-process and memory in Postgres (no fix agent).
+2. **Entra token audience:** the Runtime's JWT authorizer accepts only access tokens whose
+   audience is `entra_client_id`. That needs `"accessTokenAcceptedVersion": 2` in the app
+   manifest (step 3 already sets it).
+3. **Team leads:** approvals need the `team.lead` app role. In Entra → Enterprise
+   applications → your app → Users and groups, assign one demo user the **team.lead** role
+   (and keep yourself **security.admin**).
+4. **Fix-bot GitHub App (optional, for real PRs):** create a *second* GitHub App with
+   repository permissions **Contents: Read and write**, **Pull requests: Read and write**,
+   **Metadata: Read**, and no webhook. Install it on the demo repos only. Put its App ID and
+   installation ID in `fix_github_app_id` / `fix_github_installation_id`, and its private key
+   in the `FIX_GH_APP_PRIVATE_KEY` repository secret (5A) or in the secret named by
+   `terraform output secrets_to_populate` (5B). Without it, fixes can still be drafted and
+   approved; opening the PR fails with a clear message. The read-only App never gets write access.
+5. **Tracing (optional):** `agentcore_tracing = true` adds OpenTelemetry traces of every
+   agent run. Turn on CloudWatch **Transaction Search** once per account first (CloudWatch →
+   Application Signals → Transaction Search → Enable).
+6. **Diagnostics (optional):** `diagnostics_enabled = true`, `diagnostics_demo_instance = true`
+   and `diagnostics_demo_team = "web"` create one t4g.micro (no inbound ports) the chat agent
+   can run read-only checks on through SSM ("is nginx up on our server?").
+
+**Demo script for review and fixes**
+- As **asha** (member): open a critical Dependabot item in the brief → **Draft a fix**. The
+  agent drafts the package.json change. Click **Review**: the diff is there, but asha can't approve it.
+- As the **team lead**: **Review → Approve and open PR**. The PR appears in the demo repo
+  (or, without the fix-bot App, an explanation of what is missing).
+- As asha: click **This is wrong** on an investigation. It disappears from the brief and
+  shows up in the lead's Review panel; the next weekly run re-investigates it.
+- Ask something the data can't support ("will upgrading break our build?"). The page shows
+  the agent going back for evidence, then a "not fully sure" note listing what it couldn't verify.
+- `terraform output -raw dashboard_url`: questions, low-confidence rate, latency, feedback,
+  tokens, review queue, Gateway refusals.
+
 ## 7. Pause or tear down
 
 - **Pause between demos:** stop the RDS instance (it restarts by itself after 7 days) and
@@ -216,3 +258,9 @@ Sample findings go to the platform team.
 | Dependabot collector warns "disabled in N repos" | Alerts are off in those repos | Repo Settings → Code security → Dependabot alerts |
 | 403 "group overage" on login | The user is in more than 200 groups | Not expected in a demo tenant |
 | Login loops back to Microsoft | Redirect URI missing or added as "Web" | It must be a **Single-page application** redirect |
+| Runtime create fails on the code package | The arm64 dependency build failed or the zip is too large | Check the `terraform_data.runtime_build` output; `agentcore_tracing = false` makes it smaller |
+| Chat steps stop at "Thinking" and the answer errors with 401 | The Runtime's JWT authorizer refused the token | Token audience must be `entra_client_id` (`accessTokenAcceptedVersion: 2`); check the discovery URL's tenant |
+| Tool steps say "refused" | Scope token missing or expired, or Gateway Policy denied the call | `terraform output agentcore` shows `policy_mode`; set `agentcore_policy_mode = "LOG_ONLY"` to see what Policy would deny |
+| "Approve and open PR" says the fix agent failed | Fix-bot App not configured, or not installed on that repo | Step 6b.4 |
+| Weekly run sits in ReviewGate | Low-confidence investigations wait for a lead (up to `review_gate_timeout_hours`) | Review them in the page, or wait for the timeout; the summary is sent either way |
+| Everything AgentCore fails in your region | Service not offered there | `agentcore_enabled = false` |

@@ -107,3 +107,85 @@ def test_guard_refuses_to_run_in_aws(monkeypatch):
     monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "x")
     with pytest.raises(SystemExit):
         common.guard_local()
+
+
+def test_dev_server_runs_chat_as_a_job_with_progress(weekly):
+    import time
+    personas = load_personas()
+    chat_llm = FakeLLM([tools(call("search_findings", {"severity": ["critical"]})), say("Fix the critical one.")])
+    deps = Deps(settings=Settings.from_env(), db=Database(dsn=APP), verifier=DevVerifier(personas),
+                llm_for=lambda t: chat_llm, github=FakeGitHub())
+    deps.dispatch = dev_server.thread_dispatcher(deps, lambda: Database(dsn=APP))
+    server = dev_server.serve(deps, personas, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    auth = {"x-user-authorization": "Bearer dev:uk-lead"}
+    try:
+        req = urllib.request.Request(base + "/api/chat", method="POST", data=json.dumps(
+            {"question": "What should we fix first?"}).encode(), headers={"content-type": "application/json", **auth})
+        with urllib.request.urlopen(req) as r:
+            assert r.status == 202
+            job_id = json.loads(r.read())["job_id"]
+        for _ in range(50):
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/api/chat/job?id={job_id}", headers=auth)) as r:
+                job = json.loads(r.read())
+            if job["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert job["status"] == "done", job
+        assert "Searching critical findings" in job["steps"]
+        assert job["result"]["answer"] == "Fix the critical one."
+    finally:
+        server.shutdown()
+        deps.db.close()
+
+
+def test_dev_server_review_and_fix_flow(weekly, tmp_path, monkeypatch):
+    """Draft a fix as an engineer, approve it as the lead, get a (dry-run) pull request."""
+    from fix_local import build_fix_client
+
+    class Repo(FakeGitHub):
+        def read_file(self, repo, path):
+            if path == "package.json":
+                return json.dumps({"name": repo, "dependencies": {"example-http-lib": "^2.3.1"}}, indent=2) + "\n"
+            return None
+
+    monkeypatch.setenv("AUDIT_DB_APP_DSN", APP)
+    monkeypatch.delenv("FIX_GITHUB_TOKEN", raising=False)
+    personas = load_personas()
+    deps = Deps(settings=Settings.from_env(), db=Database(dsn=APP), verifier=DevVerifier(personas),
+                llm_for=lambda t: None, github=Repo())
+    deps.fix_client, where = build_fix_client(deps.github, out=tmp_path)
+    assert "dry run" in where
+    server = dev_server.serve(deps, personas, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+
+    def api(method, path, persona, body=None):
+        req = urllib.request.Request(base + path, method=method, data=json.dumps(body).encode() if body else None,
+                                     headers={"content-type": "application/json",
+                                              "x-user-authorization": f"Bearer dev:{persona}"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    try:
+        brief = api("GET", "/api/brief", "uk-lead")[1]
+        fid = brief["teams"][0]["top"][0]["id"]
+        status, drafted = api("POST", "/api/fixes/request", "uk-lead", {"finding_id": fid})
+        assert status == 200 and drafted["status"] == "awaiting_approval", drafted
+        assert drafted["manifest"] == "package.json"                      # mapped from package-lock.json
+        reviews = api("GET", "/api/reviews", "uk-lead")[1]
+        assert reviews["can_decide"] and reviews["fixes"][0]["fix_request_id"] == drafted["fix_request_id"]
+        assert api("GET", "/api/reviews", "growth-engineer")[1]["fixes"] == []          # other team's fix
+        status, out = api("POST", "/api/fixes/decide", "uk-lead",
+                          {"fix_request_id": drafted["fix_request_id"], "decision": "approved"})
+        assert status == 200 and out["status"] == "opened" and out["pr_url"].startswith("file://")
+        written = list(tmp_path.rglob("package.json"))
+        assert len(written) == 1 and '"^2.3.4"' in written[0].read_text()
+        assert (written[0].parent / "PULL_REQUEST.md").exists()
+    finally:
+        server.shutdown()
+        deps.db.close()

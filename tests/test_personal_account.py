@@ -278,3 +278,17 @@ def test_forced_tool_rejected_falls_back_to_auto():
         tool_choice={"type": "function", "function": {"name": "submit_investigation"}})
     assert calls == [{"tool": {"name": "submit_investigation"}}, {"auto": {}}]
     assert resp.tool_calls[0].name == "submit_investigation"
+
+
+def test_nova_inline_thinking_is_hidden_from_users():
+    fake = FakeBedrock({"output": {"message": {"content": [
+        {"text": "<thinking>The user wants criticals; I should search.</thinking>\nFix the lodash upgrade first."}]}},
+        "usage": {}})
+    resp = BedrockLLM("ap-southeast-2", client=fake).complete(
+        model="apac.amazon.nova-pro-v1:0", messages=[{"role": "user", "content": "q"}], tools=[],
+        tool_choice="auto", max_tokens=10, user="u", tags=[])
+    assert resp.text == "Fix the lodash upgrade first."
+    assert "<thinking>" in resp.raw_content[0]["text"]       # sent back to the model unchanged
+    only = FakeBedrock({"output": {"message": {"content": [{"text": "<thinking>just planning"}]}}, "usage": {}})
+    assert BedrockLLM("x", client=only).complete(model="m", messages=[{"role": "user", "content": "q"}], tools=[],
+                                                 tool_choice="auto", max_tokens=5, user="u", tags=[]).text is None

@@ -26,7 +26,7 @@ locals {
   agent_statements = [
     { actions = ["rds-db:connect"], resources = ["${local.db_user_arn}/${local.app_db_user}"] },
     { actions = ["secretsmanager:GetSecretValue"], resources = [
-      aws_secretsmanager_secret.gateway_keys.arn, aws_secretsmanager_secret.github_private_key.arn] },
+    aws_secretsmanager_secret.gateway_keys.arn, aws_secretsmanager_secret.github_private_key.arn] },
     # Direct Bedrock backend only. Cross-region inference profiles route to the foundation
     # model in several regions, so the model ARN is allowed in any region.
     { actions = ["bedrock:InvokeModel"], resources = var.llm_backend == "bedrock" ? [
@@ -35,9 +35,31 @@ locals {
     ] : [] },
   ]
 
+  # AgentCore access for the Lambdas (empty lists are dropped from the policy).
+  agentcore_lambda_statements = [
+    { actions = ["bedrock-agentcore:InvokeGateway"], resources = local.agentcore ? [aws_bedrockagentcore_gateway.tools[0].gateway_arn] : [] },
+    { actions = ["secretsmanager:GetSecretValue"], resources = local.agentcore ? [aws_secretsmanager_secret.scope_key[0].arn] : [] },
+  ]
+
   fn_statements = tomap({
-    chat        = local.agent_statements
-    investigate = local.agent_statements
+    chat = concat(local.agent_statements, local.agentcore_lambda_statements, [
+      { actions = ["bedrock-agentcore:CreateEvent", "bedrock-agentcore:ListEvents", "bedrock-agentcore:GetEvent",
+        "bedrock-agentcore:RetrieveMemoryRecords"],
+      resources = local.agentcore ? [aws_bedrockagentcore_memory.chat[0].arn] : [] },
+      # the review API releases the weekly run's review gate. Task-token calls are authorized
+      # by the (unguessable) token; IAM's resource for them is "*".
+      { actions = ["states:SendTaskSuccess"], resources = ["*"] },
+      # the review API asks the fix agent to open an approved PR (A2A over SigV4)
+      { actions = ["bedrock-agentcore:InvokeAgentRuntime"], resources = local.agentcore && var.fix_agent_enabled ? [
+        "arn:${local.partition}:bedrock-agentcore:${var.aws_region}:${local.account_id}:runtime/${local.ac_name}_fix-*",
+      "arn:${local.partition}:bedrock-agentcore:${var.aws_region}:${local.account_id}:runtime/${local.ac_name}_fix-*/*"] : [] },
+      # start background chat jobs (the function invokes its own `live` alias)
+      { actions = ["lambda:InvokeFunction"], resources = [
+        "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.name}-chat",
+        "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${local.name}-chat:*",
+      ] },
+    ])
+    investigate = concat(local.agent_statements, local.agentcore_lambda_statements)
     ingest = [
       { actions = ["rds-db:connect"], resources = ["${local.db_user_arn}/${local.ingest_db_user}"] },
       { actions = ["s3:GetObject"], resources = ["${aws_s3_bucket.data.arn}/runs/*"] },
@@ -51,6 +73,11 @@ locals {
     ]
     notify = [
       { actions = ["secretsmanager:GetSecretValue"], resources = [aws_secretsmanager_secret.slack_webhook.arn] },
+    ]
+    review_gate = [
+      { actions = ["rds-db:connect"], resources = ["${local.db_user_arn}/${local.ingest_db_user}"] },
+      { actions = ["secretsmanager:GetSecretValue"], resources = [aws_secretsmanager_secret.slack_webhook.arn] },
+      { actions = ["states:SendTaskSuccess"], resources = ["*"] },
     ]
     migrate = [
       { actions = ["secretsmanager:GetSecretValue"], resources = [aws_db_instance.db.master_user_secret[0].secret_arn] },

@@ -1,18 +1,25 @@
 name: deploy-demo
 
-# Manual deploys of the demo stack to a personal AWS account. Nothing to install locally.
+# Deploys the demo stack to a personal AWS account. Nothing to install locally.
+#   push to main      tests + eval gate, then plan and APPLY (docs-only pushes are skipped)
+#   manual run        choose plan, apply or destroy (destroy is manual only)
 # Setup: local/DEPLOY-DEMO.md ("Deploy from GitHub Actions").
 #
 # Repository secrets
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   IAM user keys (default), or instead...
 #   (variable) AWS_ROLE_ARN                     ...a role trusted for GitHub OIDC (preferred)
-#   DEMO_TFVARS                                 the full contents of your demo.tfvars
+#   DEMO_TFVARS (optional)                      contents of terraform.tfvars; if unset, the
+#                                               committed terraform/terraform.tfvars is used
 #   GH_APP_PRIVATE_KEY                          the GitHub App's .pem file contents
+#   FIX_GH_APP_PRIVATE_KEY (optional)           the fix-bot GitHub App's .pem (opens approved fix PRs)
 # Repository variables
 #   AUDIT_AGENT_DEMO = true                     stops deploy.yml from trying the company deploy
 #   AWS_REGION (optional, default us-east-1), TF_STATE_BUCKET (optional)
 
 on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "local/**", "evals/README*"]
   workflow_dispatch:
     inputs:
       action:
@@ -35,11 +42,13 @@ concurrency:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'ap-southeast-2' }}
+  # A push has no inputs: it applies. Manual runs use the chosen action.
+  ACTION: ${{ inputs.action || 'apply' }}
   TF_IN_AUTOMATION: "true"
 
 jobs:
   test:
-    if: inputs.action != 'destroy'
+    if: (inputs.action || 'apply') != 'destroy'
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -53,11 +62,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pytest boto3
+      - run: pip install -r requirements-runtime.txt pytest
       - run: pytest -q
         env:
           TEST_PG_HOST: localhost
           TEST_PG_PORT: "5432"
+          PYTHONPATH: src:tests
+      - name: Eval gate (isolation, grounding, confidence gate, fix agent)
+        run: python evals/run.py && python evals/fix_eval.py
+        env:
+          EVAL_PG_HOST: localhost
+          EVAL_PG_PORT: "5432"
+          PYTHONPATH: src
 
   terraform:
     needs: test
@@ -74,7 +90,7 @@ jobs:
           python-version: "3.12" # builds the Lambda dependency layer
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_wrapper: false
+          terraform_wrapper: false # latest release; the config needs >= 1.11 (write-only secret values)
 
       - name: AWS credentials (OIDC role)
         if: vars.AWS_ROLE_ARN != ''
@@ -94,13 +110,20 @@ jobs:
         env:
           DEMO_TFVARS: ${{ secrets.DEMO_TFVARS }}
         run: |
-          if [ -z "$DEMO_TFVARS" ]; then echo "::error::Add the DEMO_TFVARS secret (contents of demo.tfvars)"; exit 1; fi
-          if printf '%s\n' "$DEMO_TFVARS" | grep -v '^[[:space:]]*#' | grep -q '"<'; then
-            echo "::error::DEMO_TFVARS still has <placeholder> values"; exit 1
+          if [ -n "$DEMO_TFVARS" ]; then
+            printf '%s\n' "$DEMO_TFVARS" > terraform.tfvars
+            echo "Using the DEMO_TFVARS secret"
+          elif [ -f terraform.tfvars ]; then
+            echo "Using the committed terraform/terraform.tfvars"
+          else
+            echo "::error::No variables: commit terraform/terraform.tfvars or add the DEMO_TFVARS secret"; exit 1
+          fi
+          if grep -v '^[[:space:]]*#' terraform.tfvars | grep -q '"<'; then
+            echo "::error::terraform.tfvars still has <placeholder> values"; exit 1
           fi
           who=$(aws sts get-caller-identity --query Arn --output text)
           case "$who" in *:root) echo "::error::Don't use root credentials; create an IAM user"; exit 1;; esac
-          echo "Deploying as $who"
+          echo "Deploying as $who ($ACTION)"
 
       - name: State bucket (created on first run)
         id: state
@@ -122,25 +145,20 @@ jobs:
           printf 'bucket = "%s"\nkey = "audit-demo/terraform.tfstate"\nregion = "%s"\nuse_lockfile = true\n' \
             "$bucket" "$AWS_REGION" > backend.hcl
 
-      - name: Write variables
-        env:
-          DEMO_TFVARS: ${{ secrets.DEMO_TFVARS }}
-        run: printf '%s\n' "$DEMO_TFVARS" > demo.tfvars
-
       - run: terraform init -backend-config=backend.hcl -input=false
       - run: terraform validate
 
       - name: Plan
         run: |
-          terraform plan -input=false -var-file=terraform.tfvars ${{ inputs.action == 'destroy' && '-destroy' || '' }} -out=tfplan
+          terraform plan -input=false ${{ env.ACTION == 'destroy' && '-destroy' || '' }} -out=tfplan
           terraform show -no-color tfplan | grep -E '^Plan:|No changes' >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Apply
-        if: inputs.action == 'apply' || inputs.action == 'destroy'
+        if: env.ACTION == 'apply' || env.ACTION == 'destroy'
         run: terraform apply -input=false tfplan
 
       - name: Upload the GitHub App key to Secrets Manager
-        if: inputs.action == 'apply'
+        if: env.ACTION == 'apply'
         env:
           GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
         run: |
@@ -155,18 +173,41 @@ jobs:
           rm -f key.pem
           echo "GitHub App key stored"
 
+      - name: Upload the fix-bot GitHub App key to Secrets Manager
+        if: env.ACTION == 'apply'
+        env:
+          FIX_GH_APP_PRIVATE_KEY: ${{ secrets.FIX_GH_APP_PRIVATE_KEY }}
+        run: |
+          arn=$(terraform output -json secrets_to_populate | jq -r '.fix_github_key' | cut -d' ' -f1)
+          if [ "$arn" = "not" ] || [ -z "$arn" ]; then echo "Fix agent off"; exit 0; fi
+          if [ -z "$FIX_GH_APP_PRIVATE_KEY" ]; then
+            echo "::warning::FIX_GH_APP_PRIVATE_KEY not set: fixes can be drafted and approved, but no PR is opened"; exit 0
+          fi
+          current=$(aws secretsmanager get-secret-value --secret-id "$arn" --query SecretString --output text 2>/dev/null || true)
+          if [ "$current" = "$FIX_GH_APP_PRIVATE_KEY" ]; then echo "Key unchanged"; exit 0; fi
+          printf '%s' "$FIX_GH_APP_PRIVATE_KEY" > fixkey.pem
+          aws secretsmanager put-secret-value --secret-id "$arn" --secret-string file://fixkey.pem >/dev/null
+          rm -f fixkey.pem
+          echo "Fix-bot key stored"
+
       - name: Summary
-        if: inputs.action == 'apply'
+        if: env.ACTION == 'apply'
         run: |
           {
             echo "### Demo deployed"
             echo "- Web app: $(terraform output -raw web_url)"
             echo "- Entra redirect URI (Single-page application): $(terraform output -raw entra_redirect_uri)"
             echo "- State machine: $(terraform output -raw state_machine_arn)"
+            echo "- Dashboard: $(terraform output -raw dashboard_url)"
+            echo ""
+            echo "AgentCore:"
+            echo '```json'
+            terraform output -json agentcore
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start a collection run
-        if: inputs.action == 'apply' && inputs.run_collection
+        if: env.ACTION == 'apply' && inputs.run_collection
         run: |
           arn=$(terraform output -raw state_machine_arn)
           collectors=$(terraform output -json collectors)

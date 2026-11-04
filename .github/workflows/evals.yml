@@ -1,0 +1,63 @@
+name: evals
+
+# Manual run (the deploy-demo workflow runs the same gate before every apply): unit tests,
+# then the replay evals (isolation and
+# grounding must be 100%, every expectation met) and the fix-agent eval. No cloud access or
+# model credentials needed. Live-model evals run locally: python evals/run.py --model live
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 10
+    env:
+      TEST_PG_HOST: localhost
+      TEST_PG_PORT: "5432"
+      EVAL_PG_HOST: localhost
+      EVAL_PG_PORT: "5432"
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-runtime.txt pytest
+      - name: Unit tests
+        run: pytest -q
+        env:
+          PYTHONPATH: src:tests
+      - name: Agent evals (replay)
+        run: python evals/run.py --report eval-report.json
+      - name: Fix agent eval
+        run: python evals/fix_eval.py
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f eval-report.json ]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r = json.load(open("eval-report.json"))
+          print(f"### Agent evals ({r['mode']})\n")
+          print(f"isolation **{r['isolation']:.0%}** · grounding **{r['grounding']:.0%}** · expectations **{r['expect']:.0%}**\n")
+          bad = [x for x in r["results"] if not (x["isolation"] and x["grounded"] and x["expect"])]
+          for x in bad:
+              print(f"- `{x['id']}`: {'; '.join(x['leaks'] + x['ungrounded'] + x['failed'])}")
+          PY
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval-report.json
+          if-no-files-found: ignore

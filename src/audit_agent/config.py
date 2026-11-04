@@ -29,6 +29,13 @@ class Settings:
     chat_temperature: float | None
     batch_temperature: float | None
 
+    # Confidence gate (see harness.py): answers below the threshold go back for more evidence,
+    # at most max_confidence_retries times, then are returned flagged as low confidence.
+    confidence_threshold: float
+    max_confidence_retries: int
+    verify_answers: bool       # chat: grade each answer with a separate verifier call
+    verifier_model: str        # defaults to the batch model (cheaper)
+
     # Entra ID
     entra_tenant_id: str | None
     entra_audience: str | None
@@ -54,13 +61,17 @@ class Settings:
             db_port=int(e.get("DB_PORT", "5432")),
             db_name=e.get("DB_NAME", "audit"),
             db_user=e.get("DB_USER", "audit_app_login"),
-            aws_region=e.get("AWS_REGION", "us-east-1"),
+            aws_region=e.get("AUDIT_AWS_REGION") or e.get("AWS_REGION", "us-east-1"),
             gateway_url=e.get("GATEWAY_URL", "http://localhost:4000"),
             gateway_keys_secret=e.get("GATEWAY_KEYS_SECRET"),
             chat_model=e.get("CHAT_MODEL", "audit-chat"),
             batch_model=e.get("BATCH_MODEL", "audit-batch"),
             chat_temperature=_temperature(e.get("CHAT_TEMPERATURE", "none")),
             batch_temperature=_temperature(e.get("BATCH_TEMPERATURE", "none")),
+            confidence_threshold=_fraction("CONFIDENCE_THRESHOLD", e.get("CONFIDENCE_THRESHOLD", "0.7")),
+            max_confidence_retries=_bounded_int("MAX_CONFIDENCE_RETRIES", e.get("MAX_CONFIDENCE_RETRIES", "2"), 0, 5),
+            verify_answers=e.get("VERIFY_ANSWERS", "true").lower() == "true",
+            verifier_model=e.get("VERIFIER_MODEL") or e.get("BATCH_MODEL", "audit-batch"),
             entra_tenant_id=e.get("ENTRA_TENANT_ID"),
             entra_audience=e.get("ENTRA_AUDIENCE"),
             llm_backend=_choice("LLM_BACKEND", e.get("LLM_BACKEND", "gateway"), ("gateway", "bedrock")),
@@ -70,6 +81,20 @@ class Settings:
             github_installation_id=e.get("GITHUB_INSTALLATION_ID"),
             github_private_key_secret=e.get("GITHUB_PRIVATE_KEY_SECRET"),
         )
+
+
+def _fraction(name: str, raw: str) -> float:
+    value = float(raw)
+    if not 0 <= value <= 1:
+        raise ValueError(f"{name} must be between 0 and 1")
+    return value
+
+
+def _bounded_int(name: str, raw: str, lo: int, hi: int) -> int:
+    value = int(raw)
+    if not lo <= value <= hi:
+        raise ValueError(f"{name} must be between {lo} and {hi}")
+    return value
 
 
 def _choice(name: str, value: str, allowed: tuple[str, ...]) -> str:

@@ -121,7 +121,7 @@ def test_investigate_then_cache_then_reinvestigate_on_new_evidence(wire):
     wire({}, [tools(call("get_advisory", {"ghsa_id": GHSA})), tools(call("submit_investigation", REPORT))])
     item = {"fingerprint": f"F-{G_CRIT}", "team_id": "growth_engineering"}
     assert investigate.handler(item, None) == {"status": "investigated", "fingerprint": f"F-{G_CRIT}",
-                                               "confidence": "high"}
+                                               "confidence": "high", "needs_review": False, "retries": 0}
     wire({}, [])                                   # no model calls allowed
     assert investigate.handler(item, None)["status"] == "cached"
 
@@ -164,3 +164,84 @@ def test_default_sends_no_temperature(wire):
     llm = wire(GROWTH_CLAIMS, [say("Hello.")])
     chat.handler(event({"question": "hi"}), None)
     assert llm.calls[0]["temperature"] is None
+
+
+def test_brief_route_returns_only_own_teams(wire):
+    wire(GROWTH_CLAIMS, [])
+    r = chat.handler({"headers": {"x-user-authorization": "Bearer good"}, "rawPath": "/api/brief",
+                      "requestContext": {"http": {"method": "GET"}}}, None)
+    body = json.loads(r["body"])
+    assert r["statusCode"] == 200
+    assert {t["id"] for t in body["teams"]} == {"growth_engineering"}
+    assert chat.handler({"headers": {}, "rawPath": "/api/brief",
+                         "requestContext": {"http": {"method": "GET"}}}, None)["statusCode"] == 401
+
+
+# ── Background jobs with progress steps ───────────────────────────────────
+def job_event(job_id, token="good"):
+    return {"headers": {"x-user-authorization": f"Bearer {token}"}, "rawPath": "/api/chat/job",
+            "queryStringParameters": {"id": job_id}, "requestContext": {"http": {"method": "GET"}}}
+
+
+@pytest.fixture()
+def async_wire(db):
+    queued = []
+
+    def make(claims, script):
+        llm = FakeLLM(script)
+        set_deps(Deps(settings=Settings.from_env(), db=db, verifier=FakeVerifier(claims),
+                      llm_for=lambda teams: llm, github=FakeGitHub(), dispatch=queued.append))
+        return llm
+    yield make, queued
+    set_deps(None)
+
+
+def test_chat_job_records_steps_then_answer(async_wire):
+    make, queued = async_wire
+    make(GROWTH_CLAIMS, [tools(call("search_findings", {"severity": ["critical"]})),
+                         tools(call("get_advisory", {"ghsa_id": GHSA})),
+                         say(f"Fix [F-{G_CRIT}] first.")])
+    r = chat.handler(event({"question": "What should we fix first?"}), None)
+    assert r["statusCode"] == 202
+    job_id = json.loads(r["body"])["job_id"]
+
+    running = json.loads(chat.handler(job_event(job_id), None)["body"])
+    assert running["status"] == "running" and running["steps"] == []
+
+    assert len(queued) == 1 and "headers" not in queued[0]
+    assert chat.handler(queued[0], None)["status"] == "done"          # the background invocation
+
+    done = json.loads(chat.handler(job_event(job_id), None)["body"])
+    assert done["status"] == "done"
+    assert done["steps"] == ["Thinking about your question", "Searching critical findings",
+                             "Reviewing what I found", f"Checking GitHub advisory {GHSA}",
+                             "Reviewing what I found"]
+    assert done["result"]["answer"] == f"Fix [F-{G_CRIT}] first." and done["result"]["cited"] == [f"F-{G_CRIT}"]
+    assert done["result"]["steps"] == done["steps"]
+
+
+def test_jobs_are_private_to_their_user(async_wire):
+    make, queued = async_wire
+    make(GROWTH_CLAIMS, [say("Hello.")])
+    job_id = json.loads(chat.handler(event({"question": "hi"}), None)["body"])["job_id"]
+    chat.handler(queued[0], None)
+    make({"oid": "user-uk", "groups": ["g-uk"], "roles": []}, [])
+    assert chat.handler(job_event(job_id), None)["statusCode"] == 404       # someone else's job
+    assert chat.handler(job_event("not-a-uuid"), None)["statusCode"] == 400
+
+
+def test_job_marker_cannot_come_from_the_function_url(async_wire):
+    make, _ = async_wire
+    make(GROWTH_CLAIMS, [])
+    forged = {"_job": {"id": "x"}, "headers": {}, "body": "{}"}            # a URL request always has headers
+    assert chat.handler(forged, None)["statusCode"] == 401
+
+
+def test_failed_job_reports_an_error(async_wire, monkeypatch):
+    make, queued = async_wire
+    make(GROWTH_CLAIMS, [say("x")])
+    job_id = json.loads(chat.handler(event({"question": "hi"}), None)["body"])["job_id"]
+    monkeypatch.setattr(chat, "answer", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert chat.handler(queued[0], None)["status"] == "error"
+    body = json.loads(chat.handler(job_event(job_id), None)["body"])
+    assert body["status"] == "error" and "went wrong" in body["result"]["answer"]

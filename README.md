@@ -10,13 +10,24 @@ EventBridge Scheduler (Mon 00:00 UTC)
   -> Step Functions
        Collect     ownership | dependabot | guardduty   (Lambda, outside VPC -> S3)
        Ingest      lifecycle, owners, aggregates, queue (Lambda, VPC -> RDS)
-       Investigate one finding per item, max 5 parallel  (Lambda, VPC -> RDS, LiteLLM, GitHub)
-       Notify      Slack run summary, including failures
-CloudFront (+ WAF IP allowlist)
-  /       -> S3 web app (Entra ID sign-in, PKCE)
-  /api/*  -> chat Lambda function URL (origin access control) -> RDS + LiteLLM -> Bedrock
-RDS PostgreSQL db.t3.small: findings, owners, memory, audit log; team isolation by row-level security
+       Investigate one finding per item, bounded parallel (Lambda; confidence gate)
+       ReviewGate  waits (task token) until a team lead reviews every low-confidence investigation
+       Notify      Slack run summary, including failures and review status
+CloudFront (+ optional WAF IP allowlist)
+  /       -> S3 web app (Entra ID sign-in, PKCE): brief, chat with live steps, Review panel
+  /api/*  -> chat Lambda function URL: auth, background chat jobs, review / feedback / fix API
+               -> AgentCore Runtime "audit" (HTTP, Entra JWT authorizer): the ReAct harness
+                    memory  -> AgentCore Memory (per user, per session; optional long-term)
+                    tools   -> in-process DB tools (row-level security)
+                            -> AgentCore Gateway (MCP, IAM) + Policy (Cedar, default deny)
+                                 -> tools Lambda: GitHub read, SSM diagnostics, open approved fix PR
+                    fixes   -> AgentCore Runtime "fix" (A2A): LangGraph, interrupt for approval
+RDS PostgreSQL: findings, owners, reviews, fix requests, checkpoints, audit log; isolation by RLS
+CloudWatch: metric filters on structured logs, dashboard, alarms; optional OTel traces
 ```
+
+`agentcore_enabled = false` keeps the original all-Lambda design (tools in-process, memory
+in Postgres, no fix agent); the same code runs either way.
 
 ## Try it locally first
 
@@ -38,14 +49,23 @@ src/audit_agent/
   data/ownership.yml   repo -> team rules and overrides (edit by PR)
   sql/schema.sql       tables, roles, row-level security (applied by the migrate Lambda)
   ingest.py            finding lifecycle and investigation queue
-  harness.py           the agent loop and its guarantees
-  tools/               the agent's tools
-  handlers/            Lambda entry points: collect, ingest, investigate, chat, notify, migrate
-web/                   static chat page (no dependencies)
-terraform/             the whole stack, code included
+  harness.py           the agent loop and its guarantees (citation check, confidence gate)
+  verifier.py          scores an answer against the evidence (the confidence gate's judge)
+  tools/               the agent's tools (findings, notes, GitHub, diagnostics, request_fix)
+  scope_token.py       HMAC-signed caller scope for tools behind the Gateway
+  gateway_client.py    MCP client for AgentCore Gateway (SigV4)
+  handlers/            Lambda entry points: collect, ingest, investigate, chat (+ api.py:
+                       reviews, feedback, fixes), review_gate, gateway_tools, notify, migrate
+src/fix_agent/         LangGraph fix agent: deterministic manifest edits, approval interrupt,
+                       the GitHub write tool (approved + content-hash bound), A2A server
+src/agent_main.py      AgentCore Runtime entry point (chat agent, streams steps)
+src/fix_main.py        AgentCore Runtime entry point (fix agent, A2A)
+web/                   static page (no dependencies)
+terraform/             the whole stack, code included (agentcore.tf, diagnostics.tf, ...)
+evals/                 golden questions, replay + live scoring, fix-agent eval (CI gate)
 local/                 laptop prototype: docker-compose, run_weekly.py, dev_server.py
-tests/                 78 tests against real Postgres with a scripted model
-.github/workflows/     test -> terraform fmt/validate/plan -> apply on main
+tests/                 138 tests against real Postgres with a scripted model
+.github/workflows/     evals (every push), deploy-demo (manual), deploy (company)
 ```
 
 ## What is ported from the old tool
@@ -124,33 +144,60 @@ The next `terraform apply` moves it forward again.
 
 | Guarantee | Where |
 |---|---|
-| Rounds, tokens and the Lambda deadline are capped; out of budget still ends cleanly | `harness.py` |
+| Rounds, tokens and the deadline are capped; out of budget still ends cleanly | `harness.py` |
 | Tool errors and bad arguments go back to the model; nothing crashes the run | `_run_tool` |
-| Repo and advisory text is labelled as untrusted data | `untrusted=True` tools |
+| Repo, advisory and server-log text is labelled as untrusted data | `untrusted=True` tools |
 | Chat may cite only findings retrieved this turn | `_uncited` |
-| Investigations end only via `submit_investigation`; every source must have been retrieved | `tools/submit.py` |
-| Findings are re-investigated only when evidence or `PROMPT_VERSION` changes | `memory.py`, `ingest.py` |
+| Answers below `confidence_threshold` go back for evidence, at most `max_confidence_retries` times, then are flagged to the user | `harness.py`, `verifier.py` |
+| Investigations end only via `submit_investigation`; low confidence retries, then waits for a lead | `tools/submit.py`, `review_gate.py` |
+| Tools behind the Gateway get the caller's scope as a signed token, never from the model | `scope_token.py`, `gateway_tools.py` |
+| Which agent may call which Gateway tool is a Cedar policy (default deny) | `terraform/agentcore.tf` |
+| The only write (a PR) needs a lead's approval, bound to the exact content approved | `fix_agent/github_write.py` |
+| Diagnostics are fixed read-only checks on tagged instances; no shell | `tools/diagnostics.py`, `diagnostics.tf` |
 | A failed or partial collector never marks findings fixed | `ingest.py` |
 | Every request leaves an audit-log row with every finding id shown to the model | `memory.write_audit` |
+
+## Human review
+
+| What | Who | How |
+|---|---|---|
+| Low-confidence investigation | team lead / admin | Review panel → approve (optionally correct the fix) or reject; the weekly run waits for it |
+| Investigation in the brief | any team member | "This is wrong" → hidden from the brief, re-investigated next run |
+| Team note proposed by the agent | team lead / admin | Review panel → approve or reject |
+| Fix PR drafted by the fix agent | team lead / admin | Review panel shows the diff → "Approve and open PR" |
+| Chat answer | the asker | 👍 / 👎 with an optional comment (dashboard metric) |
+
+Who may decide is enforced by row-level security policies, not by the API code.
 
 ## Memory
 
 | Kind | Where | Written by |
 |---|---|---|
-| Session (short-term) | `session_turns`, 7 days | Chat |
-| Investigation | `investigations`, by evidence hash + prompt version | Investigate |
-| Team knowledge (long-term) | `team_notes` | Agent proposes; a team lead approves (approval UI not built yet) |
+| Session (short-term) | AgentCore Memory events (or `session_turns` without AgentCore) | Chat |
+| User preferences, summaries (long-term, optional) | AgentCore Memory strategies; recalled as context, never as evidence | AgentCore |
+| Investigation | `investigations` + append-only `investigation_reviews` | Investigate, leads |
+| Team knowledge | `team_notes` | Agent proposes; a team lead approves |
+| Fix agent state | LangGraph checkpoints in Postgres (survives the approval wait) | Fix agent |
+
+## Evals
+
+```
+python evals/run.py                  # replay: the CI gate (isolation 100%, grounding 100%)
+python evals/run.py --model live     # the same 30 questions with your real model (local/.env)
+python evals/fix_eval.py             # manifest edits + draft -> approve -> PR
+```
 
 ## Tests
 
 ```
-pip install -r requirements.txt pytest boto3
+pip install -r requirements-runtime.txt pytest
 TEST_PG_HOST=localhost TEST_PG_PORT=5432 pytest -q     # needs Postgres 15+, user postgres
 ```
 
 ## Not built yet
 
 - Remaining collectors (table above); keep the old cron for them
-- Approval UI for proposed team notes; the weekly brief email
-- Response streaming (Python Lambdas need the Lambda Web Adapter)
+- The weekly brief email
+- Token-by-token streaming of the answer text (steps stream; the answer arrives whole)
 - RDS certificate verification (`sslmode=require` encrypts but doesn't verify the server)
+- Fixes for ecosystems other than npm `package.json` and pip `requirements*.txt`

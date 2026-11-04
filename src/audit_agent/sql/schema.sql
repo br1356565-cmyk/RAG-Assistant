@@ -109,8 +109,81 @@ create table if not exists investigations (
   prompt_version text not null,
   model          text not null,
   explanation    jsonb not null,
-  created_at     timestamptz not null default now(),
-  unique (fingerprint, evidence_hash, prompt_version)
+  created_at     timestamptz not null default now()
+);
+-- v2: a rejected or disputed investigation is redone with the same evidence, so the old
+-- uniqueness rule goes; low-confidence results wait for a person (needs_review).
+alter table investigations drop constraint if exists investigations_fingerprint_evidence_hash_prompt_version_key;
+alter table investigations add column if not exists needs_review boolean not null default false;
+alter table investigations add column if not exists run_id text;
+alter table investigations add column if not exists confidence real;
+create index if not exists investigations_latest on investigations (fingerprint, created_at desc);
+
+-- Human decisions on investigations. Append-only: the latest row is the current state.
+create table if not exists investigation_reviews (
+  id               bigserial primary key,
+  investigation_id bigint not null references investigations(id) on delete cascade,
+  team_id          text not null references teams(id),
+  decision         text not null check (decision in ('approved','rejected','disputed')),
+  reviewer         text not null,
+  note             text check (length(note) <= 1000),
+  fix_override     text check (length(fix_override) <= 300),
+  created_at       timestamptz not null default now()
+);
+create index if not exists reviews_by_investigation on investigation_reviews (investigation_id, created_at desc);
+
+-- auto: confident, no review needed · pending: low confidence, waiting for a lead
+-- approved / rejected: decided by a lead · disputed: a team member says it is wrong
+create or replace function review_state(inv_id bigint, inv_needs_review boolean) returns text
+language sql stable as $$
+  select coalesce(
+    (select decision from investigation_reviews r where r.investigation_id = inv_id
+      order by r.created_at desc, r.id desc limit 1),
+    case when inv_needs_review then 'pending' else 'auto' end)
+$$;
+
+-- One waiting Step Functions task per weekly run that has items to review.
+create table if not exists review_gates (
+  run_id      text primary key,
+  task_token  text not null,
+  pending     int  not null,
+  created_at  timestamptz not null default now(),
+  resolved_at timestamptz
+);
+
+-- Thumbs up/down on chat answers.
+create table if not exists answer_feedback (
+  id          bigserial primary key,
+  user_id     text not null,
+  session_id  text not null,
+  job_id      uuid,
+  rating      smallint not null check (rating in (-1, 1)),
+  comment     text check (length(comment) <= 1000),
+  answer      text check (length(answer) <= 4000),
+  created_at  timestamptz not null default now()
+);
+
+-- Fix requests drafted by the fix agent. Nothing reaches GitHub unless status = 'approved'.
+create table if not exists fix_requests (
+  id            uuid primary key,
+  fingerprint   text not null references findings(fingerprint) on delete cascade,
+  team_id       text not null references teams(id),
+  repo          text not null,
+  status        text not null default 'drafting'
+                check (status in ('drafting','awaiting_approval','approved','rejected','opened','failed')),
+  requested_by  text not null,
+  manifest_path text,
+  diff          text,
+  new_content   text,
+  rationale     text,
+  thread_id     text not null,
+  approver      text,
+  decided_at    timestamptz,
+  approved_sha256 text,                  -- hash of new_content at approval; the PR must match it
+  pr_url        text,
+  error         text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
 );
 
 -- Team knowledge: accepted risks, false positives, context. Agent may only PROPOSE.
@@ -127,6 +200,7 @@ create table if not exists team_notes (
   created_at   timestamptz not null default now(),
   check (kind <> 'accepted_risk' or expires_at is not null)
 );
+alter table team_notes add column if not exists decided_at timestamptz;
 
 -- Session memory (short-term). Cleanup job deletes expired rows daily.
 create table if not exists session_turns (
@@ -138,6 +212,19 @@ create table if not exists session_turns (
   cited       text[] not null default '{}',
   expires_at  timestamptz not null default now() + interval '7 days',
   primary key (user_id, session_id, turn)
+);
+
+-- Chat requests run as background jobs so the page can show progress ("Checking GitHub
+-- advisory ..."). Each row belongs to one user; rows older than 2 days are deleted weekly.
+create table if not exists chat_jobs (
+  id          uuid primary key,
+  user_id     text not null,
+  session_id  text not null,
+  status      text not null default 'running' check (status in ('running','done','error')),
+  steps       jsonb not null default '[]',
+  result      jsonb,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
 );
 
 create table if not exists user_prefs (
@@ -166,6 +253,10 @@ alter table investigations    enable row level security;  alter table investigat
 alter table team_notes        enable row level security;  alter table team_notes        force row level security;
 alter table session_turns     enable row level security;  alter table session_turns     force row level security;
 alter table user_prefs        enable row level security;  alter table user_prefs        force row level security;
+alter table chat_jobs         enable row level security;  alter table chat_jobs         force row level security;
+alter table investigation_reviews enable row level security; alter table investigation_reviews force row level security;
+alter table answer_feedback   enable row level security;  alter table answer_feedback   force row level security;
+alter table fix_requests      enable row level security;  alter table fix_requests      force row level security;
 alter table audit_log         enable row level security;  alter table audit_log         force row level security;
 
 drop policy if exists findings_read on findings;
@@ -211,6 +302,47 @@ drop policy if exists prefs_own on user_prefs;
 create policy prefs_own on user_prefs for all to audit_app
   using (user_id = app_user_id()) with check (user_id = app_user_id());
 
+-- Leads (and admins) decide proposed notes for their own teams, as themselves.
+drop policy if exists notes_decide on team_notes;
+create policy notes_decide on team_notes for update to audit_app
+  using (status = 'proposed' and (app_is_admin() or (team_id = any (app_team_ids()) and app_role() = 'team_lead')))
+  with check (status in ('active','rejected') and approver = app_user_id()
+              and (app_is_admin() or (team_id = any (app_team_ids()) and app_role() = 'team_lead')));
+
+drop policy if exists reviews_read on investigation_reviews;
+create policy reviews_read on investigation_reviews for select to audit_app using (
+  app_is_admin() or team_id = any (app_team_ids()));
+-- Anyone on the team may dispute; only leads and admins approve or reject.
+drop policy if exists reviews_write on investigation_reviews;
+create policy reviews_write on investigation_reviews for insert to audit_app with check (
+  reviewer = app_user_id()
+  and (app_is_admin() or team_id = any (app_team_ids()))
+  and (decision = 'disputed' or app_is_admin() or app_role() = 'team_lead'));
+
+drop policy if exists feedback_own on answer_feedback;
+create policy feedback_own on answer_feedback for all to audit_app
+  using (user_id = app_user_id() or app_is_admin()) with check (user_id = app_user_id());
+
+-- Fix requests: the team reads them; a member may create one; only a lead or admin of the
+-- team decides it, as themselves. The fix agent's worker scope updates drafting rows.
+drop policy if exists fixes_read on fix_requests;
+create policy fixes_read on fix_requests for select to audit_app using (
+  app_is_admin() or team_id = any (app_team_ids()));
+drop policy if exists fixes_create on fix_requests;
+create policy fixes_create on fix_requests for insert to audit_app with check (
+  (app_is_admin() or team_id = any (app_team_ids())) and status = 'drafting' and approver is null);
+drop policy if exists fixes_update on fix_requests;
+create policy fixes_update on fix_requests for update to audit_app
+  using (app_is_admin() or team_id = any (app_team_ids()))
+  with check (
+    (app_is_admin() or team_id = any (app_team_ids()))
+    and (status not in ('approved','rejected') or approver = app_user_id())
+    and (status not in ('approved','rejected') or app_is_admin() or app_role() = 'team_lead'));
+
+drop policy if exists jobs_own on chat_jobs;
+create policy jobs_own on chat_jobs for all to audit_app
+  using (user_id = app_user_id()) with check (user_id = app_user_id());
+
 drop policy if exists audit_insert on audit_log;
 create policy audit_insert on audit_log for insert to audit_app with check (user_id = app_user_id());
 
@@ -219,7 +351,8 @@ do $$
 declare t text;
 begin
   foreach t in array array['findings','finding_events','weekly_aggregates','investigations',
-                           'team_notes','session_turns','user_prefs','audit_log'] loop
+                           'team_notes','session_turns','user_prefs','audit_log','chat_jobs',
+                           'investigation_reviews','answer_feedback','fix_requests'] loop
     execute format('drop policy if exists ingest_all on %I', t);
     execute format('create policy ingest_all on %I for all to audit_ingest using (true) with check (true)', t);
   end loop;
@@ -231,6 +364,12 @@ grant select on teams, repo_owners, runs, run_collectors to audit_app;
 grant select on findings, finding_events, weekly_aggregates, investigations, team_notes to audit_app;
 grant insert on investigations, team_notes, audit_log to audit_app;
 grant select, insert, update, delete on session_turns, user_prefs to audit_app;
+grant select, insert, update on chat_jobs to audit_app;
+grant select, insert on investigation_reviews, answer_feedback to audit_app;
+grant update (status, approver, decided_at) on team_notes to audit_app;
+grant select, insert, update on fix_requests to audit_app;
+grant select, update (resolved_at, pending) on review_gates to audit_app;
+grant execute on function review_state(bigint, boolean) to audit_app, audit_ingest;
 grant usage on all sequences in schema public to audit_app;
 -- audit_app gets no UPDATE/DELETE on audit_log or investigations: append-only.
 

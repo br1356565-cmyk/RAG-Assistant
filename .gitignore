@@ -5,10 +5,11 @@ terraform/.terraform/
 terraform/.terraform.lock.hcl.bak
 terraform/.build/
 terraform/*.tfstate*
-terraform/terraform.tfvars
+# terraform/terraform.tfvars is committed for the demo deploy (no secrets in it)
 terraform/backend.hcl
 terraform/tfplan
 local/.env
 local/.data/
 local/.venv/
 terraform/demo.tfvars
+local/out/

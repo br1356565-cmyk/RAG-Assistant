@@ -45,6 +45,8 @@ class ToolContext:
     github: GitHubClient | None = None
     mode: str = "chat"
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    ssm: Any = None             # diagnostics: object with .client (SSM) and .ec2 (EC2); None = off
+    fix_client: Any = None      # request_fix: object with .request_fix(scope, fingerprint); None = off
     # What this run has actually seen; used to check citations and sources.
     retrieved_findings: set[str] = field(default_factory=set)
     retrieved_sources: set[str] = field(default_factory=set)
@@ -134,7 +136,23 @@ def tool(name: str, description: str, args: type[Args], modes: set[str], *,
     return register
 
 
-def tools_for(mode: str) -> list[Tool]:
-    from . import advisory, findings, notes, repo, submit  # noqa: F401  (registers tools)
+def tools_for(mode: str, deps: Any = None) -> list[Tool]:
+    """The tools a mode may use. With a Gateway client in `deps`, the GitHub and diagnostics
+    tools run remotely behind AgentCore Gateway instead of in-process (same schemas)."""
+    from . import advisory, diagnostics, findings, fix, notes, repo, submit  # noqa: F401  (registers tools)
 
-    return [t for t in REGISTRY.values() if mode in t.modes]
+    tools = [t for t in REGISTRY.values() if mode in t.modes]
+    gateway = getattr(deps, "gateway", None)
+    remote = set(gateway.tool_names) if gateway is not None else set()
+    # Optional tools appear only where they can work.
+    if getattr(deps, "fix_client", None) is None:
+        tools = [t for t in tools if t.name != "request_fix"]
+    if getattr(deps, "ssm", None) is None:
+        tools = [t for t in tools if t.name not in DIAGNOSTIC_TOOLS or t.name in remote]
+    if gateway is not None:
+        from .remote import remote_version
+        tools = [remote_version(t, gateway) if t.name in remote else t for t in tools]
+    return tools
+
+
+DIAGNOSTIC_TOOLS = {"list_instances", "run_diagnostic"}

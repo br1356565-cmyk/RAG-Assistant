@@ -7,6 +7,7 @@ Bedrock client translates them. Tests use a scripted fake.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -153,7 +154,8 @@ class BedrockLLM:
                 calls.append(ToolCall(id=u["toolUseId"], name=u["name"], arguments=json.dumps(u.get("input") or {})))
         usage = resp.get("usage") or {}
         raw = list(resp.get("output", {}).get("message", {}).get("content") or [])
-        return LLMResponse(text="".join(texts) or None, tool_calls=calls,
+        text = _strip_thinking("".join(texts))
+        return LLMResponse(text=text or None, tool_calls=calls,
                            tokens_in=usage.get("inputTokens", 0), tokens_out=usage.get("outputTokens", 0),
                            raw_content=raw)
 
@@ -197,6 +199,16 @@ def to_converse(messages: list[dict]) -> tuple[list[dict], list[dict]]:
         else:
             raise ValueError(f"unsupported message role {role!r}")
     return system, turns
+
+
+_THINKING = re.compile(r"<thinking>.*?(</thinking>|$)\s*", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_thinking(text: str) -> str:
+    """Amazon Nova writes its reasoning inline as <thinking>...</thinking> when it uses
+    tools. Users should only see the answer. (The raw turn, with the tags, is still sent
+    back to the model unchanged.)"""
+    return _THINKING.sub("", text).strip()
 
 
 def _is_validation_error(exc: Exception) -> bool:

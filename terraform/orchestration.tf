@@ -2,6 +2,8 @@
 #   Collect (Map over collectors; a failed collector is recorded, not fatal)
 #   -> Ingest (lifecycle, owners, aggregates, investigation queue)
 #   -> Investigate (Map over the queue, bounded concurrency; failures recorded)
+#   -> ReviewGate (waits, up to review_gate_timeout_hours, until a team lead has reviewed every
+#      low-confidence investigation; continues at once when there are none)
 #   -> Notify (Slack summary). If ingest fails: NotifyFailure, then the execution fails.
 
 locals {
@@ -117,7 +119,29 @@ locals {
           }
         }
         ResultPath = "$.investigations"
-        Next       = "Notify"
+        Next       = "ReviewGate"
+      }
+
+      # Human review: the task token is stored; the review API completes it when the last
+      # pending investigation is decided. A timeout or error never fails the run.
+      ReviewGate = {
+        Type     = "Task"
+        Resource = "arn:${local.partition}:states:::lambda:invoke.waitForTaskToken"
+        Parameters = {
+          FunctionName = local.alias_arn["review_gate"]
+          Payload = {
+            "run_id.$"     = "$$.Execution.Name"
+            "task_token.$" = "$$.Task.Token"
+          }
+        }
+        TimeoutSeconds = var.review_gate_timeout_hours * 3600
+        ResultPath     = "$.review"
+        Retry          = [local.lambda_retry]
+        Catch = [
+          { ErrorEquals = ["States.Timeout"], ResultPath = "$.review", Next = "Notify" },
+          { ErrorEquals = ["States.ALL"], ResultPath = "$.review", Next = "Notify" },
+        ]
+        Next = "Notify"
       }
 
       Notify = {
@@ -129,6 +153,7 @@ locals {
             "run_id.$"         = "$$.Execution.Name"
             "ingest.$"         = "$.ingest.summary"
             "investigations.$" = "$.investigations"
+            "review.$"         = "$.review"
           }
         }
         Retry = [local.lambda_retry]
@@ -181,7 +206,7 @@ resource "aws_iam_role" "sfn" {
 data "aws_iam_policy_document" "sfn" {
   statement {
     actions   = ["lambda:InvokeFunction"]
-    resources = [for k in ["collect", "ingest", "investigate", "notify"] : local.alias_arn[k]]
+    resources = [for k in ["collect", "ingest", "investigate", "review_gate", "notify"] : local.alias_arn[k]]
   }
   statement {
     # Required by Step Functions to deliver execution logs to CloudWatch Logs.

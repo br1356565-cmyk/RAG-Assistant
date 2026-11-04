@@ -128,8 +128,8 @@ def load_finding(ctx: ToolContext, fingerprint: str) -> dict:
             "select event, at from finding_events where fingerprint = %s order by at desc limit 10", (fingerprint,)
         ).fetchall()
         inv = conn.execute(
-            "select explanation, created_at, prompt_version from investigations "
-            "where fingerprint = %s order by created_at desc limit 1", (fingerprint,)
+            "select explanation, created_at, prompt_version, review_state(id, needs_review) as state "
+            "from investigations where fingerprint = %s order by created_at desc, id desc limit 1", (fingerprint,)
         ).fetchone()
         notes = conn.execute(
             "select kind, text, expires_at from team_notes where fingerprint = %s and status = 'active' "
@@ -160,11 +160,18 @@ def get_finding(ctx: ToolContext, a: FindingArg) -> ToolResult:
         "active_notes": [{"kind": n["kind"], "text": n["text"],
                           "expires": n["expires_at"].isoformat() if n["expires_at"] else None} for n in d["notes"]],
     }
-    if d["investigation"]:
+    inv = d["investigation"]
+    if inv and inv["state"] in ("auto", "approved"):
         out["latest_investigation"] = {
-            **d["investigation"]["explanation"],
-            "investigated_on": d["investigation"]["created_at"].date().isoformat(),
+            **inv["explanation"],
+            "investigated_on": inv["created_at"].date().isoformat(),
+            "reviewed_by_a_person": inv["state"] == "approved",
         }
+    elif inv:
+        # Not shown as fact: a lead hasn't approved it, or someone disputed or rejected it.
+        out["investigation_status"] = {"pending": "low confidence, waiting for a team lead's review",
+                                       "disputed": "disputed by the team; it will be redone",
+                                       "rejected": "rejected by a reviewer; it will be redone"}[inv["state"]]
     return ToolResult(out, finding_ids={fp}, sources={f"finding:{ref(fp)}"})
 
 

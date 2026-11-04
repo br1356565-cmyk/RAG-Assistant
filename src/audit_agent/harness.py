@@ -23,10 +23,12 @@ from typing import Any, Callable
 
 from .llm import LLM, LLMResponse, ToolCall
 from .tools.base import Tool, ToolContext, ToolError, ToolResult
+from .tools.labels import label as tool_label
 
 log = logging.getLogger(__name__)
 
 CITATION_RE = re.compile(r"\[F-([0-9a-f]{16})\]")
+CONFIDENCE_LEVELS = {"high": 0.9, "medium": 0.7, "low": 0.4}
 HARNESS = "[harness] "
 
 
@@ -41,6 +43,10 @@ class HarnessConfig:
     deadline_s: float = 50.0       # set from the Lambda's remaining time
     max_identical_calls: int = 2
     temperature: float | None = None  # None = provider default; set per job, e.g. 0 for investigations
+    # Confidence gate: below the threshold the agent is sent back to gather more evidence,
+    # at most max_confidence_retries times; after that the answer is returned and flagged.
+    confidence_threshold: float = 0.7
+    max_confidence_retries: int = 2
 
 
 @dataclass
@@ -63,6 +69,10 @@ class RunResult:
     tokens_in: int = 0
     tokens_out: int = 0
     rounds: int = 0
+    confidence: float | None = None    # chat: verifier score; investigate: from the submission
+    confidence_retries: int = 0
+    low_confidence: bool = False       # still below the threshold after the retries
+    missing: list[str] = field(default_factory=list)
 
     @property
     def tokens(self) -> int:
@@ -74,7 +84,8 @@ class RunResult:
 
 class Harness:
     def __init__(self, llm: LLM, tools: list[Tool], config: HarnessConfig,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic, verifier: Callable | None = None):
+        self.verifier = verifier      # (question, answer, evidence) -> Verdict | None
         self.llm = llm
         self.tools = {t.name: t for t in tools}
         self.schemas = [t.schema() for t in tools]
@@ -83,16 +94,24 @@ class Harness:
         self.terminal = next((t.name for t in tools if t.terminal), None)
 
     # ── public ────────────────────────────────────────────────────────────
-    def run(self, ctx: ToolContext, messages: list[dict]) -> RunResult:
+    def run(self, ctx: ToolContext, messages: list[dict],
+            on_step: Callable[[dict], None] | None = None) -> RunResult:
+        """`on_step` receives progress events for the UI: {"kind": "thinking"|"tool"|"check",
+        "label": "..."}. It is called before each step starts; failures in it are ignored."""
+        self._on_step = on_step
         res = RunResult(status="error")
         start = self.clock()
         calls_seen: Counter[str] = Counter()
         corrected_citations = False
         nudged_submit = False
+        first_tool_msg = len(messages)
+        question = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
 
         while res.rounds < self.cfg.max_rounds:
             if self._out_of_budget(res, start):
                 break
+            self._emit("thinking", "Thinking about your question" if res.rounds == 0
+                       else "Reviewing what I found")
             resp = self._call_model(ctx, messages, res, tool_choice="auto")
             if resp is None:
                 return res
@@ -111,21 +130,68 @@ class Harness:
                 bad = self._uncited(text, ctx)
                 if bad and not corrected_citations:
                     corrected_citations = True
+                    self._emit("check", "Double-checking a citation")
                     messages.append(_harness_msg(
                         f"Your answer cites {', '.join('F-' + b for b in sorted(bad))}, which you did not "
                         "retrieve in this conversation turn. Look them up or remove them, then answer again."))
                     continue
-                return self._answered(res, ctx, _strip_citations(text, bad))
+                text = _strip_citations(text, bad)
+                if self.verifier is not None and not self._out_of_budget(res, start):
+                    self._emit("check", "Checking the answer against what I found")
+                    verdict = self.verifier(question, text, _evidence(messages[first_tool_msg:]), ctx.scope.user_id)
+                    if verdict is not None:
+                        res.tokens_in += verdict.tokens
+                        res.confidence, res.missing = verdict.confidence, verdict.missing
+                        if (verdict.confidence < self.cfg.confidence_threshold
+                                and res.confidence_retries < self.cfg.max_confidence_retries):
+                            res.confidence_retries += 1
+                            self._emit("retry", f"Not confident enough yet ({verdict.confidence:.0%}); looking "
+                                       f"for more evidence (retry {res.confidence_retries} of "
+                                       f"{self.cfg.max_confidence_retries})")
+                            gaps = "; ".join(verdict.missing) or "the specific facts in your answer"
+                            messages.append(_harness_msg(
+                                f"A reviewer rated your answer {verdict.confidence:.0%} supported by the evidence. "
+                                f"Check with tools: {gaps}. Then answer again. If the data does not exist, "
+                                "say so plainly instead of guessing."))
+                            continue
+                        res.low_confidence = verdict.confidence < self.cfg.confidence_threshold
+                return self._answered(res, ctx, text)
 
             for call in resp.tool_calls:
+                self._emit("tool", tool_label(call.name, call.arguments), name=call.name)
                 result_text, ok, done = self._run_tool(call, ctx, calls_seen, res)
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": result_text})
                 if done is not None:
+                    conf = CONFIDENCE_LEVELS.get(str(done.get("confidence")), 0.5)
+                    if (conf < self.cfg.confidence_threshold
+                            and res.confidence_retries < self.cfg.max_confidence_retries
+                            and not self._out_of_budget(res, start)):
+                        res.confidence_retries += 1
+                        self._emit("retry", f"Confidence is {done.get('confidence')}; gathering more evidence "
+                                   f"(retry {res.confidence_retries} of {self.cfg.max_confidence_retries})")
+                        messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps({
+                            "error": "Not accepted yet: confidence is low. Gather more evidence first (for "
+                                     "example read the manifest or lockfile, or search the code for the vulnerable "
+                                     "package's usage), then submit again. If nothing more can be found, submit "
+                                     "with confidence 'low'."})})
+                        continue
+                    messages.append({"role": "tool", "tool_call_id": call.id, "content": result_text})
                     res.status, res.data = "submitted", done
+                    res.confidence = conf
+                    res.low_confidence = conf < self.cfg.confidence_threshold
                     res.finding_ids |= ctx.retrieved_findings
                     return res
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": result_text})
 
         return self._finalize(ctx, messages, res)
+
+    def _emit(self, kind: str, text: str, **extra) -> None:
+        cb = getattr(self, "_on_step", None)
+        if cb is None:
+            return
+        try:
+            cb({"kind": kind, "label": text, **extra})
+        except Exception:  # progress must never break an answer
+            log.warning("progress callback failed", exc_info=True)
 
     # ── model ─────────────────────────────────────────────────────────────
     def _call_model(self, ctx: ToolContext, messages: list[dict], res: RunResult, tool_choice) -> LLMResponse | None:
@@ -162,7 +228,8 @@ class Harness:
                 raise ToolError(f"Unknown tool '{call.name}'. Available: {', '.join(self.tools)}")
             key = f"{call.name}:{_normalize_args(call.arguments)}"
             seen[key] += 1
-            if seen[key] > self.cfg.max_identical_calls:
+            # a resubmission after a confidence retry may legitimately repeat; the retry cap bounds it
+            if seen[key] > self.cfg.max_identical_calls and not tool.terminal:
                 raise ToolError("You already made this exact call; use the earlier result.")
             args = tool.parse(call.arguments)
             result: ToolResult = tool.handler(ctx, args)
@@ -214,10 +281,13 @@ class Harness:
                     content, ok, done = self._run_tool(call, ctx, Counter(), res)
                     if done is not None:
                         res.status, res.data = "submitted", done
+                        res.confidence = CONFIDENCE_LEVELS.get(str(done.get("confidence")), 0.5)
+                        res.low_confidence = res.confidence < self.cfg.confidence_threshold
                         return res
             res.status = "limit"
             return res
 
+        self._emit("thinking", "Wrapping up with what I have")
         messages.append(_harness_msg("Stop calling tools. Answer now with what you have, and say "
                                      "plainly what you could not check."))
         resp = self._call_model(ctx, messages, res, tool_choice="auto")
@@ -230,6 +300,11 @@ class Harness:
         out = self._answered(res, ctx, _strip_citations(text, self._uncited(text, ctx)))
         out.status = "limit"
         return out
+
+
+def _evidence(messages: list[dict]) -> list[str]:
+    """What the tools returned in this run, for the verifier."""
+    return [m["content"] for m in messages if m.get("role") == "tool" and m.get("content")]
 
 
 def _harness_msg(text: str) -> dict:

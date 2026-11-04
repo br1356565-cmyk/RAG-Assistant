@@ -36,6 +36,11 @@ def format_message(event: dict) -> str:
     lines.append(f"Findings: {ing.get('opened', 0)} new, {ing.get('fixed', 0)} fixed, {ing.get('reopened', 0)} reopened")
     if inv:
         lines.append("Investigations: " + ", ".join(f"{n} {s}" for s, n in sorted(inv.items())))
+    rv = event.get("review") or {}
+    if rv.get("Error") == "States.Timeout" or rv.get("timed_out"):
+        lines.append(":hourglass: Some low-confidence investigations were not reviewed within the time limit.")
+    elif rv.get("reviewed"):
+        lines.append("All low-confidence investigations from this run were reviewed by a team lead.")
     for w in (ing.get("warnings") or [])[:5]:
         lines.append(f"• {w}")
     return "\n".join(lines)

@@ -37,15 +37,24 @@ def build(db: Database, scope: Scope, top_n: int = 3) -> dict:
                 "and status = 'active' and (expires_at is null or expires_at >= current_date)", (team,)).fetchone()["n"]
             top = conn.execute(
                 f"select f.fingerprint, f.title, f.resource, f.severity, f.source, f.first_seen, f.details, "
-                f"       i.explanation, i.created_at as investigated_at "
+                f"       i.explanation, i.created_at as investigated_at, i.state as review, "
+                f"       (select r.fix_override from investigation_reviews r where r.investigation_id = i.id "
+                f"        order by r.created_at desc, r.id desc limit 1) as fix_override "
                 f"from findings f "
-                f"left join lateral (select explanation, created_at from investigations i "
-                f"  where i.fingerprint = f.fingerprint order by created_at desc limit 1) i on true "
+                f"left join lateral (select id, explanation, created_at, review_state(id, needs_review) as state "
+                f"  from investigations i where i.fingerprint = f.fingerprint "
+                f"  and review_state(i.id, i.needs_review) in ('auto','approved') "
+                f"  order by created_at desc, id desc limit 1) i on true "
                 f"where f.team_id = %s and f.status = 'open' and f.data_class = 'team' "
                 f"and not exists (select 1 from team_notes n where n.fingerprint = f.fingerprint "
                 f"  and n.kind in ('accepted_risk','false_positive') and n.status = 'active' "
                 f"  and (n.expires_at is null or n.expires_at >= current_date)) "
                 f"order by {SEV_RANK}, f.first_seen limit %s", (team, top_n)).fetchall()
+            awaiting = conn.execute(
+                "select count(*) n from (select distinct on (i.fingerprint) review_state(i.id, i.needs_review) st "
+                "from investigations i join findings f on f.fingerprint = i.fingerprint "
+                "where f.team_id = %s and f.status = 'open' order by i.fingerprint, i.created_at desc, i.id desc) x "
+                "where st in ('pending','disputed')", (team,)).fetchone()["n"]
             counts = (week or {}).get("counts", {}) if week else {}
             out["teams"].append({
                 "id": team,
@@ -54,6 +63,7 @@ def build(db: Database, scope: Scope, top_n: int = 3) -> dict:
                 "open_by_source": {r["source"]: r["n"] for r in src},
                 "this_week": {k: counts.get(k, 0) for k in ("opened", "fixed", "reopened")},
                 "accepted_risks": accepted,
+                "awaiting_review": awaiting,
                 "top": [_item(r, now) for r in top],
             })
 
@@ -77,7 +87,8 @@ def _item(r: dict, now: datetime) -> dict:
     if exp:
         item.update({
             "summary": exp.get("summary"),
-            "fix": (exp.get("fix") or {}).get("action"),
+            "fix": r.get("fix_override") or (exp.get("fix") or {}).get("action"),
+            "reviewed": r.get("review") == "approved",
             "impact": (exp.get("impact") or {}).get("verdict"),
             "confidence": exp.get("confidence"),
             "investigated_on": r["investigated_at"].date().isoformat() if r["investigated_at"] else None,

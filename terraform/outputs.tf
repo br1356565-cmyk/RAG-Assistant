@@ -30,6 +30,7 @@ output "secrets_to_populate" {
     gateway_keys       = "${aws_secretsmanager_secret.gateway_keys.arn}  JSON: {\"default\": \"sk-...\", \"<team_id>\": \"sk-...\"}"
     github_private_key = "${aws_secretsmanager_secret.github_private_key.arn}  PEM file of the GitHub App"
     slack_webhook      = "${aws_secretsmanager_secret.slack_webhook.arn}  https://hooks.slack.com/services/..."
+    fix_github_key     = local.agentcore && var.fix_agent_enabled ? "${aws_secretsmanager_secret.fix_github_private_key[0].arn}  PEM file of the fix-bot GitHub App (write access)" : "not used"
   }
 }
 
@@ -41,4 +42,25 @@ output "collector_role_arn" {
 output "collectors" {
   description = "Collectors the weekly run uses (input for a manual run)."
   value       = var.collectors
+}
+
+output "agentcore" {
+  description = "AgentCore pieces (null when agentcore_enabled = false)."
+  value = local.agentcore ? {
+    audit_runtime_arn = aws_bedrockagentcore_agent_runtime.audit[0].agent_runtime_arn
+    fix_runtime_arn   = var.fix_agent_enabled ? aws_bedrockagentcore_agent_runtime.fix[0].agent_runtime_arn : null
+    memory_id         = aws_bedrockagentcore_memory.chat[0].id
+    gateway_url       = aws_bedrockagentcore_gateway.tools[0].gateway_url
+    policy_engine_id  = aws_bedrockagentcore_policy_engine.tools[0].policy_engine_id
+    policy_mode       = var.agentcore_policy_mode
+    gateway_tools     = local.gateway_tools
+  } : null
+}
+
+output "diagnostics_demo_instance_id" {
+  value = var.diagnostics_enabled && var.diagnostics_demo_instance ? aws_instance.diag_demo[0].id : null
+}
+
+output "dashboard_url" {
+  value = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.agent.dashboard_name}"
 }

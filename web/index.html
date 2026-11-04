@@ -23,6 +23,14 @@
     .msg { margin:10px 0; padding:12px 14px; border-radius:10px; white-space:pre-wrap; word-wrap:break-word; }
     .user { background:var(--chip); margin-left:15%; }
     .bot { background:var(--panel); border:1px solid var(--line); margin-right:5%; }
+    .steps { list-style:none; margin:0; padding:0; white-space:normal; }
+    .step { padding:3px 0 3px 22px; position:relative; color:var(--muted, #6b7280); font-size:14px; }
+    .step::before { content:"✓"; position:absolute; left:2px; color:var(--muted, #6b7280); }
+    .step.current { color:inherit; }
+    .step.current::before { content:"●"; animation:pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity:.25; } }
+    .trail { margin-top:10px; white-space:normal; }
+    .trail summary { cursor:pointer; color:var(--muted, #6b7280); font-size:13px; }
     .meta, .muted { color:var(--muted); font-size:12px; }
     .cite { display:inline-block; font:12px ui-monospace, monospace; background:var(--chip); color:var(--accent); padding:1px 6px; border-radius:6px; margin:2px 4px 0 0; }
     form { display:flex; gap:8px; padding-top:8px; }
@@ -43,14 +51,32 @@
     .sev-medium, .sev-low, .sev-info { color:var(--med); background:var(--med-bg); }
     .suggest { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 2px; }
     .suggest button { background:var(--chip); color:var(--accent); font-size:13px; padding:4px 10px; border-radius:14px; }
+    button.small { padding:4px 10px; font-size:13px; border-radius:6px; }
+    button.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); }
+    button.right { float:right; }
+    .actions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-top:8px; white-space:normal; }
+    .inline-form { display:flex; gap:6px; align-items:center; margin-top:8px; white-space:normal; flex-wrap:wrap; }
+    .inline-form input, input.wide { flex:1; min-width:180px; padding:5px 8px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink); font:inherit; font-size:13px; }
+    input.wide { width:100%; margin-top:8px; }
+    .tag { display:inline-block; font-size:11px; font-weight:500; color:var(--accent); background:var(--chip); padding:0 6px; border-radius:4px; margin-left:6px; }
+    .warn { margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--high-bg); color:var(--high); font-size:13px; white-space:normal; }
+    .warn ul { margin:4px 0 0; padding-left:18px; }
+    #review { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:8px; max-height:60vh; overflow-y:auto; }
+    #review h2 { font-size:15px; margin:14px 0 2px; }
+    .item.decided { opacity:.55; }
+    pre.diff { font:12px/1.45 ui-monospace, monospace; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; overflow-x:auto; margin:8px 0 0; }
+    pre.diff .add { color:#1a7f37; } pre.diff .del { color:var(--crit); }
+    #review-btn { margin-right:10px; }
+    @media (max-width: 600px) { .user { margin-left:5%; } .bot { margin-right:0; } header { padding:10px 16px; } }
   </style>
 </head>
 <body>
   <header>
     <h1>DevOps Audit Assistant</h1>
-    <div><select id="persona" hidden aria-label="Sign in as"></select><span id="who"></span></div>
+    <div><button id="review-btn" class="small ghost" type="button" hidden>Review</button><select id="persona" hidden aria-label="Sign in as"></select><span id="who"></span></div>
   </header>
   <main>
+    <div id="review" hidden></div>
     <div id="log">
       <div id="brief" hidden></div>
       <div class="suggest" id="suggest"></div>

@@ -152,13 +152,17 @@ def ingest(conn, run_id: str, results: list[dict], load: Callable[[str], dict], 
 
         # 4. Expired chat sessions.
         conn.execute("delete from session_turns where expires_at < now()")
+        conn.execute("delete from chat_jobs where created_at < now() - interval '2 days'")
 
         # 5. What to investigate: changed, or never investigated with the current prompt.
         queue = conn.execute(
             f"select f.fingerprint, f.team_id from findings f where f.status = 'open' and f.team_id is not null "
             f"and f.data_class = 'team' and f.source = any(%s) and f.severity = any(%s) "
             f"and (f.fingerprint = any(%s) or not exists (select 1 from investigations i where "
-            f"i.fingerprint = f.fingerprint and i.team_id = f.team_id and i.prompt_version = %s)) "
+            f"i.fingerprint = f.fingerprint and i.team_id = f.team_id and i.prompt_version = %s) "
+            f"or exists (select 1 from investigations i where i.fingerprint = f.fingerprint "
+            f"  and i.id = (select max(j.id) from investigations j where j.fingerprint = f.fingerprint) "
+            f"  and review_state(i.id, i.needs_review) in ('rejected','disputed'))) "
             f"order by {SEV_RANK}, f.first_seen limit %s",
             (list(investigate_sources), list(investigate_severities), sorted(changed), PROMPT_VERSION,
              max_investigations)).fetchall()
@@ -175,5 +179,6 @@ def ingest(conn, run_id: str, results: list[dict], load: Callable[[str], dict], 
                        for r in results],
         "opened": sum(opened.values()), "fixed": sum(fixed.values()), "reopened": sum(reopened.values()),
         "warnings": warnings[:30],
-        "investigate": [{"fingerprint": f"F-{q['fingerprint']}", "team_id": q["team_id"]} for q in queue],
+        "investigate": [{"fingerprint": f"F-{q['fingerprint']}", "team_id": q["team_id"], "run_id": run_id}
+                        for q in queue],
     }

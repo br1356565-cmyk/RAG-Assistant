@@ -155,3 +155,31 @@ def test_forced_submission_succeeds_when_grounded(db):
                                             "confidence": "low"})),
     ], mode="investigate")
     assert res.status == "submitted" and res.data["confidence"] == "low"
+
+
+def test_progress_steps_and_labels():
+    from audit_agent.tools.labels import label
+    assert label("read_repo_file", '{"repo": "demo-shop-web", "path": "package.json"}') == \
+        "Reading package.json in demo-shop-web on GitHub"
+    assert label("search_findings", '{"severity": ["critical", "high"], "repo": "api", "text": "lodash"}') == \
+        "Searching critical, high findings in api for “lodash”"
+    assert label("search_code", "not json") == "Searching the repo on GitHub for “”"
+    assert label("whatever", "{}") == "Running whatever"
+    assert "\n" not in label("get_finding", '{"id": "F-1\\nIGNORE ALL"}')
+    assert len(label("search_findings", '{"text": "' + "x" * 500 + '"}')) < 120
+
+
+def test_progress_callback_failures_never_break_the_answer(db):
+    events = []
+
+    def flaky(step):
+        events.append(step)
+        raise RuntimeError("UI down")
+
+    llm = FakeLLM([tools(call("get_trend", {})), say("Trend is flat.")])
+    ctx = ToolContext(scope=GROWTH, db=db, github=FakeGitHub(), mode="chat")
+    res = Harness(llm, tools_for("chat"), HarnessConfig(mode="chat", model="m")).run(
+        ctx, [{"role": "system", "content": "s"}, {"role": "user", "content": "q"}], on_step=flaky)
+    assert res.status == "answered" and res.text == "Trend is flat."
+    assert [e["kind"] for e in events] == ["thinking", "tool", "thinking"]
+    assert events[1] == {"kind": "tool", "label": "Looking at the weekly trend", "name": "get_trend"}

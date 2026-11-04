@@ -52,22 +52,29 @@ def evidence_hash(finding: dict) -> str:
 
 def cached_investigation(db: Database, scope: Scope, fingerprint: str, ev_hash: str,
                          prompt_version: str) -> dict | None:
+    """The latest investigation for this exact evidence and prompt, unless a person rejected
+    or disputed it (then it is done again)."""
     with db.scoped(scope) as conn:
         row = conn.execute(
-            "select explanation from investigations where fingerprint = %s and evidence_hash = %s "
-            "and prompt_version = %s", (fingerprint, ev_hash, prompt_version),
+            "select explanation, review_state(id, needs_review) as state from investigations "
+            "where fingerprint = %s and evidence_hash = %s and prompt_version = %s "
+            "order by created_at desc, id desc limit 1", (fingerprint, ev_hash, prompt_version),
         ).fetchone()
-    return row["explanation"] if row else None
+    if not row or row["state"] in ("rejected", "disputed"):
+        return None
+    return row["explanation"]
 
 
 def save_investigation(db: Database, scope: Scope, fingerprint: str, team_id: str, ev_hash: str,
-                       prompt_version: str, model: str, explanation: dict) -> None:
+                       prompt_version: str, model: str, explanation: dict, *, needs_review: bool = False,
+                       confidence: float | None = None, run_id: str | None = None) -> int:
     with db.scoped(scope) as conn:
-        conn.execute(
-            "insert into investigations (fingerprint, team_id, evidence_hash, prompt_version, model, explanation) "
-            "values (%s, %s, %s, %s, %s, %s) on conflict (fingerprint, evidence_hash, prompt_version) do nothing",
-            (fingerprint, team_id, ev_hash, prompt_version, model, json.dumps(explanation)),
-        )
+        return conn.execute(
+            "insert into investigations (fingerprint, team_id, evidence_hash, prompt_version, model, explanation, "
+            "needs_review, confidence, run_id) values (%s, %s, %s, %s, %s, %s, %s, %s, %s) returning id",
+            (fingerprint, team_id, ev_hash, prompt_version, model, json.dumps(explanation), needs_review,
+             confidence, run_id),
+        ).fetchone()["id"]
 
 
 def write_audit(db: Database, scope: Scope, *, mode: str, question: str | None, tools: list[dict],
@@ -79,3 +86,72 @@ def write_audit(db: Database, scope: Scope, *, mode: str, question: str | None, 
             (scope.user_id, list(scope.team_ids), mode, (question or "")[:2000], json.dumps(tools),
              sorted(finding_ids), model, tokens),
         )
+
+
+# ── Conversation memory backends ─────────────────────────────────────────────
+class PostgresMemory:
+    """Short-term memory in the session_turns table (local, tests, and the Lambda path)."""
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    def load(self, scope: Scope, session_id: str) -> list[dict]:
+        return load_history(self.db, scope, session_id)
+
+    def append(self, scope: Scope, session_id: str, question: str, answer: str, cited: list[str]) -> None:
+        append_turns(self.db, scope, session_id, question, answer, cited)
+
+    def recall(self, scope: Scope, query: str) -> list[str]:
+        return []
+
+
+class AgentCoreMemory:
+    """AgentCore Memory: short-term events per (user, session), plus long-term records that
+    the memory's strategies extract (conversation summaries, user preferences).
+
+    Isolation: actorId is always the verified user's id, and long-term retrieval is limited
+    to the namespace path /users/<that id>/, so one user's memory never reaches another.
+    Remembered text is context for the model, never evidence: citations must still be
+    fetched in the current run (the harness enforces that)."""
+
+    def __init__(self, memory_id: str, client=None, region: str | None = None):
+        if client is None:
+            import boto3
+            client = boto3.client("bedrock-agentcore", region_name=region)
+        self.memory_id, self.client = memory_id, client
+
+    @staticmethod
+    def _actor(scope: Scope) -> str:
+        return scope.user_id.replace("/", "_")
+
+    def load(self, scope: Scope, session_id: str) -> list[dict]:
+        resp = self.client.list_events(memoryId=self.memory_id, actorId=self._actor(scope), sessionId=session_id,
+                                       includePayloads=True, maxResults=HISTORY_TURNS * 2)
+        events = sorted(resp.get("events", []), key=lambda e: str(e.get("eventTimestamp")))
+        out: list[dict] = []
+        for e in events:
+            for item in e.get("payload", []):
+                conv = item.get("conversational") or {}
+                role = {"USER": "user", "ASSISTANT": "assistant"}.get(conv.get("role"))
+                text = (conv.get("content") or {}).get("text")
+                if role and text:
+                    out.append({"role": role, "content": text})
+        return out[-HISTORY_TURNS:]
+
+    def append(self, scope: Scope, session_id: str, question: str, answer: str, cited: list[str]) -> None:
+        from datetime import datetime, timezone
+        self.client.create_event(
+            memoryId=self.memory_id, actorId=self._actor(scope), sessionId=session_id,
+            eventTimestamp=datetime.now(timezone.utc),
+            payload=[{"conversational": {"role": "USER", "content": {"text": question[:MAX_STORED_CHARS]}}},
+                     {"conversational": {"role": "ASSISTANT", "content": {"text": answer[:MAX_STORED_CHARS]}}}])
+
+    def recall(self, scope: Scope, query: str, top_k: int = 3) -> list[str]:
+        try:
+            resp = self.client.retrieve_memory_records(
+                memoryId=self.memory_id, namespacePath=f"/users/{self._actor(scope)}/",
+                searchCriteria={"searchQuery": query[:500], "topK": top_k})
+        except Exception:  # noqa: BLE001 - long-term memory is a nice-to-have, never a blocker
+            return []
+        return [str((r.get("content") or {}).get("text", ""))[:500]
+                for r in resp.get("memoryRecordSummaries", []) if (r.get("content") or {}).get("text")]

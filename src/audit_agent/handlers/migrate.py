@@ -14,6 +14,7 @@ import time
 
 import psycopg
 from psycopg import sql
+from psycopg.rows import dict_row
 
 
 log = logging.getLogger()
@@ -69,5 +70,8 @@ def handler(event: dict, context) -> dict:
                          password=master["password"], sslmode="require", connect_timeout=10,
                          autocommit=True) as conn:
         digest = apply(conn)
+        conn.row_factory = dict_row
+        from fix_agent.checkpoints import setup as setup_checkpoints
+        setup_checkpoints(conn)               # LangGraph tables for paused fix graphs
     log.info(json.dumps({"event": "migrate", "schema_sha256": digest}))
     return {"status": "ok", "schema_sha256": digest}

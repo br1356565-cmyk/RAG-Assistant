@@ -1,7 +1,11 @@
 """Investigation Lambda, run by a Step Functions Map state after each weekly ingest.
 
-Input (one Map item):  {"fingerprint": "F-0123456789abcdef", "team_id": "growth_engineering"}
+Input (one Map item):  {"fingerprint": "F-0123456789abcdef", "team_id": "growth_engineering", "run_id": "..."}
 Output:                {"status": "investigated" | "cached" | "skipped" | "not_found" | "failed", ...}
+
+Confidence gate: a low-confidence submission is sent back for more evidence (capped
+retries); if it is still low, it is saved with needs_review and waits for a team lead
+before it appears in the brief.
 
 The worker's scope is the finding's team only, so its tools and inserts are confined to
 that team by the same row-level security as user requests.
@@ -50,19 +54,26 @@ def handler(event: dict, context) -> dict:
     ctx.retrieved_sources |= view.sources
 
     deadline = context.get_remaining_time_in_millis() / 1000 - 5 if context else 120.0
-    cfg = HarnessConfig(mode="investigate", model=deps.settings.batch_model, max_rounds=8,
-                        max_tokens_total=40_000, max_output_tokens=1_000, deadline_s=deadline,
-                        temperature=deps.settings.batch_temperature)
+    st = deps.settings
+    cfg = HarnessConfig(mode="investigate", model=st.batch_model, max_rounds=10,
+                        max_tokens_total=50_000, max_output_tokens=1_000, deadline_s=deadline,
+                        temperature=st.batch_temperature, confidence_threshold=st.confidence_threshold,
+                        max_confidence_retries=st.max_confidence_retries)
     messages = [{"role": "system", "content": INVESTIGATE_SYSTEM},
                 {"role": "user", "content": investigate_task(view.data)}]
-    result = Harness(deps.llm_for((team,)), tools_for("investigate"), cfg).run(ctx, messages)
+    result = Harness(deps.llm_for((team,)), tools_for("investigate", deps), cfg).run(ctx, messages)
 
     write_audit(deps.db, scope, mode="investigate", question=ref(fp), tools=result.tool_log(),
                 finding_ids=result.finding_ids, model=cfg.model, tokens=result.tokens)
     log.info(json.dumps({"event": "investigate", "finding": ref(fp), "team": team, "status": result.status,
-                         "rounds": result.rounds, "tokens": result.tokens, "tools": result.tool_log()}))
+                         "rounds": result.rounds, "tokens": result.tokens, "tools": result.tool_log(),
+                         "confidence": result.confidence, "low_confidence": result.low_confidence,
+                         "retries": result.confidence_retries}))
 
     if result.status != "submitted":
         return {"status": "failed", "fingerprint": ref(fp), "reason": result.status}
-    save_investigation(deps.db, scope, fp, team, ev_hash, PROMPT_VERSION, cfg.model, result.data)
-    return {"status": "investigated", "fingerprint": ref(fp), "confidence": result.data["confidence"]}
+    save_investigation(deps.db, scope, fp, team, ev_hash, PROMPT_VERSION, cfg.model, result.data,
+                       needs_review=result.low_confidence, confidence=result.confidence,
+                       run_id=event.get("run_id"))
+    return {"status": "investigated", "fingerprint": ref(fp), "confidence": result.data["confidence"],
+            "needs_review": result.low_confidence, "retries": result.confidence_retries}

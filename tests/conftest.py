@@ -15,6 +15,8 @@ from audit_agent.db import Database, Scope
 from audit_agent.llm import LLMResponse, ToolCall
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Scripted fake models answer in a fixed order; tests that exercise the verifier turn it on.
+os.environ.setdefault("VERIFY_ANSWERS", "false")
 HOST = os.environ.get("TEST_PG_HOST", "localhost")
 PORT = os.environ.get("TEST_PG_PORT", "5432")
 DBNAME = "audit_test"
@@ -46,6 +48,8 @@ def pg():
             if not exists (select 1 from pg_roles where rolname='ingest_login') then
               create role ingest_login login in role audit_ingest; end if;
             alter role ingest_login nobypassrls; end $$;""")
+    from fix_agent.checkpoints import setup as setup_checkpoints
+    setup_checkpoints(_admin_dsn(DBNAME))
     yield
     # left in place for inspection; recreated next run
 
@@ -55,7 +59,8 @@ def seeded(pg):
     """Fresh data for each test (truncate + insert as the owner, bypassing RLS)."""
     with psycopg.connect(_admin_dsn(DBNAME), autocommit=True) as c:
         c.execute("truncate teams, repo_owners, findings, finding_events, weekly_aggregates, runs, "
-                  "run_collectors, investigations, team_notes, session_turns, user_prefs, audit_log cascade")
+                  "run_collectors, investigations, team_notes, session_turns, user_prefs, audit_log, chat_jobs, "
+                  "investigation_reviews, review_gates, answer_feedback, fix_requests cascade")
         c.execute("insert into teams values ('growth_engineering','Growth Engineering','g-growth'),"
                   "('uk_engineering','App Engineering','g-uk')")
         c.execute("insert into repo_owners (repo, team_id, source) values "

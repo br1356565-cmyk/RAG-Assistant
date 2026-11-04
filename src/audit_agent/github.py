@@ -243,6 +243,50 @@ class GitHubToken(GitHubApp):
         return self.paginate("/user/repos", {"affiliation": "owner", "per_page": 100})
 
 
+class GitHubWriter:
+    """Write calls for the fix agent: branch, commit one file, open a pull request.
+    Built on a separate GitHub App (Contents and Pull requests: write) so the read App used
+    everywhere else never gains write access."""
+
+    def __init__(self, app: GitHubApp):
+        self.app = app
+
+    def _send(self, method: str, path: str, body: dict) -> dict:
+        r = self.app._http.request(method, f"{API}{path}", json=body, headers={
+            "Authorization": f"Bearer {self.app._installation_token()}", "Accept": "application/vnd.github+json"})
+        self.app.calls += 1
+        if r.status_code >= 400:
+            raise RuntimeError(f"GitHub {method} {path} failed: {r.status_code} {_message(r)[:200]}")
+        return r.json() if r.content else {}
+
+    def default_branch(self, repo: str) -> str:
+        data = self.app._get(f"/repos/{self.app.org}/{repo}")
+        if not data:
+            raise RuntimeError(f"repo {repo} not found")
+        return data["default_branch"]
+
+    def branch_sha(self, repo: str, branch: str) -> str:
+        return self.app._get(f"/repos/{self.app.org}/{repo}/git/ref/heads/{branch}")["object"]["sha"]
+
+    def file_sha(self, repo: str, path: str, ref: str) -> str | None:
+        data = self.app._get(f"/repos/{self.app.org}/{repo}/contents/{path}", params={"ref": ref})
+        return data.get("sha") if isinstance(data, dict) else None
+
+    def create_branch(self, repo: str, name: str, sha: str) -> None:
+        self._send("POST", f"/repos/{self.app.org}/{repo}/git/refs", {"ref": f"refs/heads/{name}", "sha": sha})
+
+    def put_file(self, repo: str, path: str, content: str, branch: str, message: str, sha: str | None) -> None:
+        body = {"message": message, "branch": branch,
+                "content": base64.b64encode(content.encode()).decode()}
+        if sha:
+            body["sha"] = sha
+        self._send("PUT", f"/repos/{self.app.org}/{repo}/contents/{path}", body)
+
+    def open_pull(self, repo: str, head: str, base: str, title: str, body: str) -> str:
+        return self._send("POST", f"/repos/{self.app.org}/{repo}/pulls",
+                          {"title": title, "head": head, "base": base, "body": body})["html_url"]
+
+
 def _message(r: httpx.Response) -> str:
     try:
         return str(r.json().get("message") or "").lower()

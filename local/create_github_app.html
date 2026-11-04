@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create the audit GitHub App</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #1f2328; background: #fff; }
+  code, pre { font: 13px ui-monospace, monospace; background: #f6f8fa; padding: 2px 4px; border-radius: 4px; }
+  pre { padding: 12px; overflow-x: auto; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; }
+  input { width: 100%; padding: 8px; font: inherit; box-sizing: border-box; }
+  button { margin-top: 16px; padding: 10px 18px; font: inherit; font-weight: 600; background: #1f883d; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Create the audit GitHub App</h1>
+<p>Submits a manifest to GitHub with exactly three read-only permissions (Contents, Dependabot alerts, Metadata), no webhook, installable only on your account. GitHub shows you a confirmation page; click <b>Create GitHub App</b> there.</p>
+
+<form id="f" method="post">
+  <label for="owner">Your GitHub username</label>
+  <input id="owner" value="br1356565-cmyk" required>
+  <label for="name">App name (must be unique on GitHub)</label>
+  <input id="name" value="balaji-audit-demo" required>
+  <label for="home">Homepage URL (also where GitHub sends you back with the code)</label>
+  <input id="home" value="https://github.com/br1356565-cmyk/RAG-Assistant" required>
+  <input type="hidden" name="manifest" id="manifest">
+  <button type="submit">Continue to GitHub</button>
+</form>
+
+<h2>After you click Create on GitHub</h2>
+<ol>
+  <li>GitHub sends you to your homepage URL with <code>?code=...</code> at the end of the address. Copy that code (it expires in 1 hour and works once).</li>
+  <li>Exchange it for the App ID and private key. In <b>AWS CloudShell</b> (or any terminal with curl):
+<pre>curl -s -X POST https://api.github.com/app-manifests/PASTE_CODE_HERE/conversions \
+  -H "Accept: application/vnd.github+json" &gt; app.json
+jq -r .id app.json            # -&gt; github_app_id
+jq -r .pem app.json &gt; app.pem # -&gt; contents go into the GH_APP_PRIVATE_KEY secret
+jq -r .html_url app.json      # the App's page</pre>
+    On Windows PowerShell instead:
+<pre>$r = Invoke-RestMethod -Method Post https://api.github.com/app-manifests/PASTE_CODE_HERE/conversions
+$r.id
+$r.pem | Out-File -Encoding ascii app.pem</pre>
+  </li>
+  <li>Paste the contents of <code>app.pem</code> into the <code>GH_APP_PRIVATE_KEY</code> repo secret, then delete <code>app.pem</code> and <code>app.json</code>.</li>
+  <li>Open the App's page → <b>Install App</b> → your account → <b>Only select repositories</b> → the <code>demo-*</code> repos. The number at the end of the URL you land on is <code>github_installation_id</code>.</li>
+</ol>
+
+<script>
+  document.getElementById("f").addEventListener("submit", (e) => {
+    const owner = document.getElementById("owner").value.trim();
+    const name = document.getElementById("name").value.trim();
+    const home = document.getElementById("home").value.trim();
+    const manifest = {
+      name,
+      url: home,
+      redirect_url: home,
+      description: "Reads Dependabot alerts and repo files for the DevOps audit assistant demo.",
+      public: false,
+      hook_attributes: { url: "https://example.com/unused", active: false },
+      request_oauth_on_install: false,
+      setup_on_update: false,
+      default_permissions: { contents: "read", dependabot_alerts: "read", metadata: "read" },
+      default_events: []
+    };
+    document.getElementById("manifest").value = JSON.stringify(manifest);
+    e.target.action = "https://github.com/settings/apps/new?state=" + encodeURIComponent(owner + "-" + Date.now());
+  });
+</script>
+</body>
+</html>

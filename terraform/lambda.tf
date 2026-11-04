@@ -1,4 +1,4 @@
-# Six functions from one code package. Every deploy publishes a version and moves the
+# Seven functions from one code package (plus the Gateway tools Lambda in agentcore.tf). Every deploy publishes a version and moves the
 # `live` alias; Step Functions, the function URL and Terraform's migration call all use the
 # alias, so rolling back is: aws lambda update-alias --name live --function-version <previous>.
 
@@ -28,7 +28,19 @@ locals {
     ENTRA_AUDIENCE      = var.entra_client_id
     # A user is waiting (chat 55 s timeout): don't sit out a long GitHub rate-limit reset.
     GITHUB_MAX_RATE_WAIT_S = "15"
+    CONFIDENCE_THRESHOLD   = tostring(var.confidence_threshold)
+    MAX_CONFIDENCE_RETRIES = tostring(var.max_confidence_retries)
+    VERIFY_ANSWERS         = tostring(var.verify_answers)
   })
+
+  # With AgentCore on, chat forwards questions to the Runtime agent and releases review gates.
+  chat_agentcore_env = merge(local.agentcore_env, { for k, v in {
+    AGENT_RUNTIME_URL = local.runtime_url.audit
+    STATE_MACHINE_ARN = local.state_machine_arn
+  } : k => v if v != null })
+  # Investigations use the Gateway tools but not memory, the fix agent or diagnostics.
+  investigate_agentcore_env = { for k, v in local.agentcore_env : k => v
+  if contains(["GATEWAY_MCP_URL", "GATEWAY_TOOLS", "SCOPE_KEY_SECRET"], k) }
 
   # Unset = the GuardDuty collector reads this account. The variable is left out entirely
   # when there is no role (coalesce() can't return "", and `cond ? {} : {...}` is a type error).
@@ -41,7 +53,8 @@ locals {
       memory   = 512
       in_vpc   = true
       reserved = var.chat_reserved_concurrency
-      env      = tomap(local.agent_env)
+      # CHAT_ASYNC: answers run as background jobs so the page can show progress steps
+      env = tomap(merge(local.agent_env, local.chat_agentcore_env, { CHAT_ASYNC = "true" }))
     }
     investigate = {
       handler  = "audit_agent.handlers.investigate.handler"
@@ -49,7 +62,7 @@ locals {
       memory   = 512
       in_vpc   = true
       reserved = -1
-      env      = tomap(local.agent_env)
+      env      = tomap(merge(local.agent_env, local.investigate_agentcore_env))
     }
     ingest = {
       handler  = "audit_agent.handlers.ingest.handler"
@@ -84,6 +97,17 @@ locals {
       in_vpc   = false
       reserved = -1
       env      = tomap({ SLACK_WEBHOOK_SECRET = aws_secretsmanager_secret.slack_webhook.arn })
+    }
+    review_gate = {
+      handler  = "audit_agent.handlers.review_gate.handler"
+      timeout  = 30
+      memory   = 256
+      in_vpc   = true
+      reserved = -1
+      env = tomap(merge(local.db_env, {
+        DB_USER              = local.ingest_db_user # counts pending reviews across all teams
+        SLACK_WEBHOOK_SECRET = aws_secretsmanager_secret.slack_webhook.arn
+      }))
     }
     migrate = {
       handler  = "audit_agent.handlers.migrate.handler"
@@ -154,4 +178,13 @@ resource "aws_lambda_invocation" "migrate" {
     aws_route.private_via_instance, # create_vpc only: Secrets Manager is reached via the NAT
     aws_route.private_via_gateway,
   ]
+}
+
+# Background chat jobs are this function invoking itself asynchronously. A failed job is
+# reported to the user as an error; retrying it would answer the same question twice.
+resource "aws_lambda_function_event_invoke_config" "chat" {
+  function_name                = aws_lambda_function.fn["chat"].function_name
+  qualifier                    = aws_lambda_alias.live["chat"].name
+  maximum_retry_attempts       = 0
+  maximum_event_age_in_seconds = 60
 }

@@ -1,8 +1,9 @@
 # Demo in a fresh personal AWS account, with your own GitHub repos and a personal Entra
 # tenant. Copy to demo.tfvars (git-ignored) and fill in the <...> values.
-# Steps: local/DEPLOY-DEMO.md. Expected cost: ~$25/month; destroy after the demo.
+# Steps: local/DEPLOY-DEMO.md. Expected cost: ~$25-40/month (AgentCore is billed per use);
+# destroy after the demo.
 
-aws_region  = "us-east-1"
+aws_region  = "ap-southeast-2"
 name_prefix = "audit-demo"
 
 # Network: create everything, with a small NAT instance instead of a NAT gateway.
@@ -10,13 +11,13 @@ create_vpc        = true
 nat_mode          = "instance"
 nat_instance_type = "t4g.micro" # Free plan: only free-tier-eligible instance types
 
-# Models: Bedrock directly (no LiteLLM gateway in this account). Inference-profile ids,
-# matching aws_region: us.* for us-east-1, au.* for ap-southeast-2 (stays in Sydney/Melbourne).
-# Sonnet answers chat; Haiku runs the batch investigations (it accepts the forced final tool
-# call; Sonnet 5.5 rejects forced tool use).
+# Models: Bedrock directly (no LiteLLM gateway in this account). Inference-profile ids that
+# match aws_region. If Anthropic models are denied on the account (AccessDeniedException),
+# Amazon Nova works for both: apac.amazon.nova-pro-v1:0 in ap-southeast-2.
+# With Claude: Sonnet for chat, Haiku for batch (Sonnet 5.5 rejects forced tool use).
 llm_backend = "bedrock"
-chat_model  = "us.anthropic.claude-sonnet-5-5"
-batch_model = "us.anthropic.claude-haiku-5-5"
+chat_model  = "apac.amazon.nova-pro-v1:0"
+batch_model = "apac.amazon.nova-pro-v1:0"
 # Claude 5.x rejects any non-default temperature, so send none.
 chat_temperature  = "none"
 batch_temperature = "none"
@@ -56,7 +57,30 @@ ownership_config       = "ownership.demo.yml"
 # GuardDuty is optional: enable it in the console first (trial on the paid plan only), generate sample
 # findings, then add "guardduty" here.
 collectors        = ["ownership", "dependabot"]
-guardduty_regions = ["us-east-1"]
+guardduty_regions = ["ap-southeast-2"]
+
+# Agent quality: answers under 70% confidence go back for evidence up to twice; weekly
+# investigations still under it wait (up to 72 h) for a team lead in the Review panel.
+confidence_threshold      = 0.7
+max_confidence_retries    = 2
+verify_answers            = true
+review_gate_timeout_hours = 72
+
+# AgentCore (DEPLOY-DEMO.md step 6b). false = the all-Lambda design.
+agentcore_enabled          = true
+agentcore_policy_mode      = "ENFORCE"
+agentcore_memory_long_term = false # extraction uses an AgentCore-managed model
+agentcore_tracing          = false # needs CloudWatch Transaction Search turned on first
+
+# Fix agent: a second GitHub App with write access, used only for approved fix PRs.
+fix_agent_enabled          = true
+fix_github_app_id          = null # the fix-bot App ID, as a string
+fix_github_installation_id = null # its installation ID, as a string
+
+# Server diagnostics through SSM (read-only checks), with a small demo instance.
+diagnostics_enabled       = false
+diagnostics_demo_instance = false
+diagnostics_demo_team     = "web"
 
 # Spend guard.
 alarm_email        = "<your email>"
