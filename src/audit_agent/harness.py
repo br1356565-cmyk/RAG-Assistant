@@ -29,6 +29,11 @@ log = logging.getLogger(__name__)
 
 CITATION_RE = re.compile(r"\[F-([0-9a-f]{16})\]")
 CONFIDENCE_LEVELS = {"high": 0.9, "medium": 0.7, "low": 0.4}
+# Claims about what code does need code evidence (read_repo_file / search_code) in the run.
+CODE_CLAIM_RE = re.compile(r"\b(reachable|unreachable|exploitable|(?:is|are|isn't|aren't) (?:not )?(?:used|imported|called)"
+                           r"|imports?|imported by|calls? (?:the|this|it|that)|called (?:from|in|by))\b", re.I)
+CODE_TOOLS = {"read_repo_file", "search_code"}
+CODE_CLAIM_CAP = 0.4
 HARNESS = "[harness] "
 
 
@@ -138,8 +143,14 @@ class Harness:
                 text = _strip_citations(text, bad)
                 if self.verifier is not None and not self._out_of_budget(res, start):
                     self._emit("check", "Checking the answer against what I found")
-                    verdict = self.verifier(question, text, _evidence(messages[first_tool_msg:]), ctx.scope.user_id)
+                    called = [st.name for st in res.steps if st.kind == "tool" and st.ok]
+                    try:
+                        verdict = self.verifier(question, text, _evidence(messages[first_tool_msg:]),
+                                                ctx.scope.user_id, tools=called)
+                    except TypeError:            # a verifier without the tools argument
+                        verdict = self.verifier(question, text, _evidence(messages[first_tool_msg:]), ctx.scope.user_id)
                     if verdict is not None:
+                        verdict = self._code_claim_check(text, called, verdict)
                         res.tokens_in += verdict.tokens
                         res.confidence, res.missing = verdict.confidence, verdict.missing
                         if (verdict.confidence < self.cfg.confidence_threshold
@@ -183,6 +194,18 @@ class Harness:
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": result_text})
 
         return self._finalize(ctx, messages, res)
+
+    def _code_claim_check(self, text: str, called: list[str], verdict):
+        """Backstop for the verifier: an answer that says code is reachable / used / imported,
+        when no code was read in this run, can't be confident however the grader scored it."""
+        if not CODE_CLAIM_RE.search(text) or set(called) & CODE_TOOLS or not (CODE_TOOLS & set(self.tools)):
+            return verdict
+        if verdict.confidence <= CODE_CLAIM_CAP:
+            return verdict
+        import dataclasses
+        need = "read the code that uses the package (read_repo_file or search_code) before saying it is reachable"
+        return dataclasses.replace(verdict, confidence=CODE_CLAIM_CAP, supported=False,
+                                   missing=[need, *[m for m in verdict.missing if m != need]][:3])
 
     def _emit(self, kind: str, text: str, **extra) -> None:
         cb = getattr(self, "_on_step", None)

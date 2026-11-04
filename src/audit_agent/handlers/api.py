@@ -44,8 +44,9 @@ def reviews(deps, scope: Scope, body: dict):
             "select id, team_id, kind, text, fingerprint, expires_at, author, created_at from team_notes "
             "where status = 'proposed' order by created_at").fetchall()
         fixes = conn.execute(
-            "select id, fingerprint, team_id, repo, manifest_path, diff, rationale, requested_by, created_at "
-            "from fix_requests where status = 'awaiting_approval' order by created_at").fetchall()
+            "select id, fingerprint, team_id, repo, manifest_path, diff, rationale, requested_by, created_at, "
+            "package, covers, major_upgrade from fix_requests where status = 'awaiting_approval' "
+            "order by created_at").fetchall()
     waiting = [r for r in latest if r["state"] in ("pending", "disputed")]
     return 200, {
         "can_decide": _can_decide(scope),
@@ -61,7 +62,9 @@ def reviews(deps, scope: Scope, body: dict):
                    "author": n["author"]} for n in notes],
         "fixes": [{"fix_request_id": str(x["id"]), "finding": ref(x["fingerprint"]), "team": x["team_id"],
                    "repo": x["repo"], "manifest": x["manifest_path"], "diff": x["diff"], "rationale": x["rationale"],
-                   "requested_by": x["requested_by"]} for x in fixes],
+                   "requested_by": x["requested_by"], "package": x["package"],
+                   "covers": [ref(c) for c in (x["covers"] or [x["fingerprint"]])],
+                   "major_upgrade": x["major_upgrade"]} for x in fixes],
     }
 
 

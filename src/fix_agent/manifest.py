@@ -34,6 +34,17 @@ def version_tuple(v: str) -> tuple:
     return tuple(int(p) if p.isdigit() else -1 for p in parts[:4]) or (0,)
 
 
+def is_breaking(old_spec: str, target: str) -> bool:
+    """Semver: a new major version, or a new minor while below 1.0, may break callers."""
+    m = re.search(r"\d+(?:\.\d+)*", old_spec)
+    if not m:
+        return False
+    old, new = version_tuple(m.group(0)), version_tuple(target)
+    if new[0] != old[0]:
+        return True
+    return old[0] == 0 and len(old) > 1 and len(new) > 1 and new[1] != old[1]
+
+
 def at_least(v: str, minimum: str) -> bool:
     return version_tuple(v) >= version_tuple(minimum)
 

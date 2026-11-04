@@ -72,10 +72,13 @@ def open_fix_pr(db: Database, scope: Scope, fix_request_id: str, claims: dict | 
         w.create_branch(row["repo"], branch, w.branch_sha(row["repo"], base))
         w.put_file(row["repo"], row["manifest_path"], row["new_content"], branch,
                    f"Security fix for F-{row['fingerprint']}", w.file_sha(row["repo"], row["manifest_path"], base))
-        body = (f"{row['rationale'] or ''}\n\nFinding: F-{row['fingerprint']}\n"
+        covers = row.get("covers") or [row["fingerprint"]]
+        body = (f"{row['rationale'] or ''}\n\nFindings: {', '.join('F-' + c for c in covers)}\n"
                 f"Drafted by the DevOps audit fix agent; approved by {row['approver']}.\n\n"
                 "Please let CI regenerate or verify the lockfile before merging.")
-        url = w.open_pull(row["repo"], branch, base, f"Security: fix F-{row['fingerprint'][:8]}", body)
+        title = (f"Security: upgrade {row['package']} ({len(covers)} advisories)" if row.get("package") and len(covers) > 1
+                 else f"Security: fix F-{row['fingerprint'][:8]}")
+        url = w.open_pull(row["repo"], branch, base, title, body)
     except Exception as exc:
         with db.scoped(scope) as conn:
             conn.execute("update fix_requests set status = 'failed', error = %s, updated_at = now() where id = %s",

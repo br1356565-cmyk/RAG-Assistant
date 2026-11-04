@@ -22,25 +22,28 @@ class FixService:
     def draft(self, scope: Scope, fingerprint: str) -> dict:
         """Create a fix request for a finding in the caller's scope and run until it waits for approval."""
         with self.deps.db.scoped(scope) as conn:
-            f = conn.execute("select team_id, resource from findings where fingerprint = %s",
-                             (fingerprint,)).fetchone()
+            f = conn.execute("select team_id, resource, details->>'package' as package from findings "
+                             "where fingerprint = %s", (fingerprint,)).fetchone()
             if not f or not f["team_id"]:
                 raise FixError("finding not found in your scope")
-            # One live fix per finding: in progress, or a PR already open (the finding stays open
-            # until the PR merges and Dependabot closes the alert).
+            # One live fix per package and repo: it covers every open finding for that package, so
+            # ten axios advisories make one PR, not ten. Live = in progress, or a PR already open
+            # (findings stay open until the PR merges and Dependabot closes the alerts).
             open_req = conn.execute(
-                "select id, status, pr_url from fix_requests where fingerprint = %s and status in "
-                "('drafting','awaiting_approval','approved','opened') order by created_at desc limit 1",
-                (fingerprint,)).fetchone()
+                "select id, status, pr_url from fix_requests where status in "
+                "('drafting','awaiting_approval','approved','opened') and repo = %s "
+                "and (fingerprint = %s or %s = any(covers) or (package is not null and package = %s)) "
+                "order by created_at desc limit 1",
+                (f["resource"], fingerprint, fingerprint, f["package"])).fetchone()
             if open_req:
                 note = (f"A fix PR is already open: {open_req['pr_url']}" if open_req["status"] == "opened"
-                        else "A fix for this finding is already in progress.")
+                        else f"A fix for {f['package'] or 'this finding'} is already in progress; it covers this finding.")
                 return {"fix_request_id": str(open_req["id"]), "status": open_req["status"],
                         "pr_url": open_req["pr_url"], "note": note}
             fid = str(uuid.uuid4())
-            conn.execute("insert into fix_requests (id, fingerprint, team_id, repo, requested_by, thread_id) "
-                         "values (%s, %s, %s, %s, %s, %s)",
-                         (fid, fingerprint, f["team_id"], f["resource"], scope.user_id, fid))
+            conn.execute("insert into fix_requests (id, fingerprint, team_id, repo, requested_by, thread_id, package) "
+                         "values (%s, %s, %s, %s, %s, %s, %s)",
+                         (fid, fingerprint, f["team_id"], f["resource"], scope.user_id, fid, f["package"]))
         state = self.graph.invoke({"fix_request_id": fid, "fingerprint": fingerprint, "team_id": f["team_id"]},
                                   {"configurable": {"thread_id": fid}})
         return self._summary(fid, state)
@@ -65,4 +68,5 @@ class FixService:
             return {"fix_request_id": fid, "status": "rejected"}
         return {"fix_request_id": fid, "status": "awaiting_approval", "repo": state.get("repo"),
                 "manifest": state.get("manifest_path"), "change": f"{state.get('old_spec')} -> {state.get('new_spec')}",
-                "diff": state.get("diff"), "rationale": state.get("rationale")}
+                "diff": state.get("diff"), "rationale": state.get("rationale"),
+                "covers": len(state.get("covers") or []), "major_upgrade": bool(state.get("major_upgrade"))}

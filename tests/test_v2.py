@@ -40,7 +40,7 @@ class ScriptedVerifier:
     def __init__(self, scores):
         self.scores, self.calls = list(scores), []
 
-    def __call__(self, question, answer, evidence, user="u"):
+    def __call__(self, question, answer, evidence, user="u", tools=None):
         self.calls.append((question, answer, len(evidence)))
         return Verdict(self.scores.pop(0), True, ["the fixed version"])
 
@@ -610,3 +610,72 @@ def test_gateway_write_tool_passes_refusals_through(db):
     out = gateway_tools.handler({"fix_request_id": "00000000-0000-0000-0000-000000000000", "_scope": sign(GROWTH, KEY)},
                                 Ctx("gh-write___open_fix_pr"), env=env)
     assert out == {"error": "fix request not found in scope"}
+
+
+# ── The answer you saw: "reachable" with no code read ──────────────────────
+def test_reachability_claim_without_reading_code_is_sent_back(db):
+    """A lenient grader said 95%; the harness caps it because no code was read, the agent
+    goes back, reads the code, and only then is the answer accepted."""
+    llm = FakeLLM([tools(call("search_findings", {"text": "example-http-lib"})),
+                   say(f"The code using it is reachable; upgrade [F-{G_CRIT}]."),
+                   tools(call("search_code", {"repo": "mktp-growth-api", "query": "example-http-lib"})),
+                   say(f"src/server.js requires example-http-lib, so the vulnerable code is reachable [F-{G_CRIT}].")])
+    v = ScriptedVerifier([0.95, 0.95])
+    res = Harness(llm, tools_for("chat"), HarnessConfig(mode="chat", model="m"), verifier=v).run(
+        ToolContext(scope=GROWTH, db=db, mode="chat", github=FakeGitHub()),
+        [{"role": "user", "content": "is the example-http-lib issue reachable?"}])
+    assert res.confidence_retries == 1 and not res.low_confidence and "src/server.js" in res.text
+    nudge = [m for m in llm.calls[2]["messages"] if m["role"] == "user"][-1]["content"]
+    assert "read the code" in nudge
+
+
+def test_verifier_is_told_which_tools_ran():
+    llm = FakeLLM([tools(call("verdict", {"confidence": 0.9, "supported": True, "missing": []}))])
+    LLMVerifier(llm, "m")("q", "a", ["e"], tools=["search_findings"])
+    sent = llm.calls[0]["messages"]
+    assert "TOOLS CALLED: search_findings" in sent[1]["content"] and "Claims about CODE" in sent[0]["content"]
+
+
+# ── One fix per package, at the version that fixes every open advisory ────
+SIBLING = "a000000000000009"
+
+
+def add_sibling(first_patched):
+    owner("insert into findings (fingerprint, team_id, source, resource, rule, title, severity, data_class, details, "
+          "first_seen, last_seen) select %s, team_id, source, resource, 'GHSA-9999-9999-9999', "
+          "'example-http-lib: second advisory', 'high', 'team', details || %s, first_seen, last_seen "
+          "from findings where fingerprint = %s",
+          (SIBLING, json.dumps({"first_patched": first_patched, "advisory": "GHSA-9999-9999-9999"}), G_CRIT))
+
+
+def test_one_fix_covers_every_advisory_for_the_package(db, fix_service):
+    from audit_agent.fix_client import LocalFixClient
+    service, writer = fix_service
+    add_sibling("2.4.0")
+    client = LocalFixClient(service)
+    d = client.request_fix(GROWTH, G_CRIT)
+    assert d["change"] == "^2.3.1 -> ^2.4.0" and d["covers"] == 2 and not d["major_upgrade"]
+    again = client.request_fix(GROWTH, SIBLING)                   # the other advisory: same fix
+    assert again["fix_request_id"] == d["fix_request_id"] and "covers this finding" in again["note"]
+    card = api.reviews(deps_for(db, fix_client=client), LEAD, {})[1]["fixes"][0]
+    assert sorted(card["covers"]) == sorted([f"F-{G_CRIT}", f"F-{SIBLING}"]) and card["package"] == "example-http-lib"
+    status, out = api.decide_fix(deps_for(db, fix_client=client), LEAD,
+                                 {"fix_request_id": d["fix_request_id"], "decision": "approved"})
+    assert status == 200 and out["status"] == "opened"
+    pr = [c for c in writer.calls if c[0] == "pr"][0]
+    assert len(owner("select id from fix_requests")) == 1
+
+
+def test_major_upgrade_is_flagged_everywhere(db, fix_service):
+    from audit_agent.fix_client import LocalFixClient
+    service, _ = fix_service
+    add_sibling("3.0.1")
+    d = LocalFixClient(service).request_fix(GROWTH, G_CRIT)
+    assert d["change"] == "^2.3.1 -> ^3.0.1" and d["major_upgrade"] and "major-version upgrade" in d["rationale"]
+    assert owner("select major_upgrade from fix_requests")[0] == (True,)
+
+
+def test_breaking_change_rule():
+    from fix_agent.manifest import is_breaking
+    assert is_breaking("^2.3.1", "3.0.0") and is_breaking("0.21.0", "0.30.0") and is_breaking("==1.23", "2.0")
+    assert not is_breaking("^2.3.1", "2.4.0") and not is_breaking("0.21.0", "0.21.1")

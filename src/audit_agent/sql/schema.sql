@@ -185,6 +185,10 @@ create table if not exists fix_requests (
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
+-- One fix per package: a request covers every open finding for that package in that manifest.
+alter table fix_requests add column if not exists package text;
+alter table fix_requests add column if not exists covers text[] not null default '{}';
+alter table fix_requests add column if not exists major_upgrade boolean not null default false;
 
 -- Team knowledge: accepted risks, false positives, context. Agent may only PROPOSE.
 create table if not exists team_notes (

@@ -159,7 +159,8 @@
       try {
         const { data } = await postJSON("/api/fixes/request", { finding_id: findingId });
         wrap.replaceChildren(el("span", "muted", data.status === "awaiting_approval"
-          ? `Fix drafted (${data.change || "see Review"}); a team lead approves it in Review.`
+          ? `Fix drafted (${data.change || "see Review"}${data.covers > 1 ? `, covers ${data.covers} findings` : ""}`
+            + `${data.major_upgrade ? ", MAJOR upgrade" : ""}); a team lead approves it in Review.`
           : (data.note || `Fix request ${data.status}`)));
         refreshReviewCount();
       } catch (err) { wrap.replaceChildren(el("span", "muted", err.message)); }
@@ -327,8 +328,11 @@
     if (data.fixes.length) panel.appendChild(el("h2", null, "Fixes to approve"));
     for (const f of data.fixes) {
       const card = el("div", "item");
-      card.appendChild(el("div", "item-title", `${f.repo} · ${f.manifest}`));
-      card.appendChild(el("div", "muted", `${f.finding} · requested by ${f.requested_by}`));
+      const title = el("div", "item-title", `${f.repo} · ${f.manifest}`);
+      if (f.major_upgrade) title.appendChild(el("span", "tag warn-tag", "major upgrade: check breaking changes"));
+      card.appendChild(title);
+      const n = (f.covers || []).length;
+      card.appendChild(el("div", "muted", `${n > 1 ? `Fixes ${n} findings for ${f.package}` : f.finding} · requested by ${f.requested_by}`));
       if (f.rationale) card.appendChild(el("div", null, f.rationale));
       const diff = el("pre", "diff");
       (f.diff || "").split("\n").forEach((line) => {

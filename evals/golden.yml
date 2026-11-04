@@ -358,3 +358,18 @@ cases:
         args: {}
       - answer: ECHO
     expect: { any: [public-read-prohibited], none: [growth-exports] }
+
+  # ── Reachability needs code evidence, however generous the grader ──────────
+  - id: reach-needs-code
+    persona: growth
+    question: Is the example-http-lib issue actually reachable in mktp-growth-api?
+    verify: true
+    verdicts: [0.95, 0.95]
+    script:
+      - tool: search_findings
+        args: { text: example-http-lib }
+      - answer: "Yes, the code using it is reachable [F-a100000000000001]."
+      - tool: search_code
+        args: { repo: mktp-growth-api, query: example-http-lib }
+      - answer: "Yes: src/server.js requires example-http-lib [F-a100000000000001]."
+    expect: { any: [server.js], tools: [search_code], retries: 1, low_confidence: false }

@@ -28,6 +28,11 @@ Rate how well the ANSWER is supported by the EVIDENCE for the QUESTION.
 - If the question needs no data (a greeting, how to use the assistant), confidence is 1.0.
 - An answer that plainly says data is unavailable, when the evidence shows the lookup came back
   empty, is supported.
+- Claims about CODE (that something is reachable, used, imported, called, exploitable, or not)
+  need file contents or code search results in the evidence. A finding list, an advisory or a
+  dependency scope is not evidence of what the code does. If such a claim has no file or code
+  search behind it, confidence is at most 0.4 and `missing` says which code to read.
+- TOOLS CALLED lists what the assistant actually ran; judge only by that evidence.
 List in `missing` what the assistant should look up to answer better (at most 3 short items).
 Call the `verdict` tool exactly once."""
 
@@ -54,13 +59,15 @@ class LLMVerifier:
     def __init__(self, llm: LLM, model: str, max_tokens: int = 400):
         self.llm, self.model, self.max_tokens = llm, model, max_tokens
 
-    def __call__(self, question: str, answer: str, evidence: list[str], user: str = "verifier") -> Verdict | None:
+    def __call__(self, question: str, answer: str, evidence: list[str], user: str = "verifier",
+                 tools: list[str] | None = None) -> Verdict | None:
         joined = "\n---\n".join(evidence) or "(no tools were called)"
         if len(joined) > MAX_EVIDENCE_CHARS:
             joined = joined[:MAX_EVIDENCE_CHARS] + "\n[evidence truncated]"
         messages = [
             {"role": "system", "content": RUBRIC},
-            {"role": "user", "content": f"QUESTION:\n{question}\n\nANSWER:\n{answer}\n\nEVIDENCE:\n{joined}"},
+            {"role": "user", "content": f"QUESTION:\n{question}\n\nANSWER:\n{answer}\n\n"
+                                        f"TOOLS CALLED: {', '.join(tools) if tools else '(none)'}\n\nEVIDENCE:\n{joined}"},
         ]
         try:
             resp = self.llm.complete(model=self.model, messages=messages, tools=[VERDICT_TOOL],

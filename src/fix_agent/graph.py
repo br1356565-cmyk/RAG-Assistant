@@ -21,7 +21,7 @@ from langgraph.types import interrupt
 from audit_agent.db import Database, Scope
 
 from .github_write import content_hash
-from .manifest import ManifestError, bump, manifest_for
+from .manifest import ManifestError, bump, is_breaking, manifest_for, version_tuple
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ class FixState(TypedDict, total=False):
     team_id: str
     repo: str
     package: str
+    covers: list
+    major_upgrade: bool
     manifest_path: str
     target: str
     advisory: str
@@ -79,6 +81,18 @@ def build_graph(deps: FixDeps, checkpointer):
         if f["source"] != "dependabot" or not d.get("first_patched") or not d.get("manifest"):
             return {"error": "only Dependabot findings with a fixed version can be drafted"}
         manifest = manifest_for(d["manifest"])
+        # Every open Dependabot finding for this package in this manifest is fixed by one edit:
+        # the highest of their first patched versions.
+        with deps.db.scoped(scope) as conn:
+            sibs = conn.execute(
+                "select fingerprint, details->>'first_patched' as fixed, details->>'advisory' as advisory "
+                "from findings where source = 'dependabot' and status = 'open' and resource = %s "
+                "and details->>'package' = %s and details->>'manifest' = %s and details->>'first_patched' is not null",
+                (f["resource"], d.get("package"), d["manifest"])).fetchall()
+        sibs = sibs or [{"fingerprint": f["fingerprint"], "fixed": d["first_patched"], "advisory": d.get("advisory")}]
+        target = max((s_["fixed"] for s_ in sibs), key=version_tuple)
+        covers = sorted(s_["fingerprint"] for s_ in sibs)
+        advisories = sorted({s_["advisory"] for s_ in sibs if s_["advisory"]})
         try:
             file = deps.read_file(scope, f["resource"], manifest)
         except Exception as exc:  # noqa: BLE001
@@ -86,7 +100,8 @@ def build_graph(deps: FixDeps, checkpointer):
         if file.get("truncated"):
             return {"error": f"{manifest} is too large to edit safely"}
         return {"repo": f["resource"], "package": d.get("package"), "manifest_path": manifest,
-                "target": d["first_patched"], "advisory": d.get("advisory") or "", "summary": f["title"],
+                "target": target, "covers": covers, "advisory": ", ".join(advisories[:5]),
+                "summary": f["title"] if len(covers) == 1 else f"{len(covers)} advisories for {d.get('package')}",
                 "new_content": file["content"]}
 
     def edit(state: FixState) -> dict:
@@ -94,12 +109,18 @@ def build_graph(deps: FixDeps, checkpointer):
             e = bump(state["manifest_path"], state["new_content"], state["package"], state["target"])
         except ManifestError as exc:
             return {"error": str(exc)}
-        return {"new_content": e.new, "diff": e.diff, "old_spec": e.old_spec, "new_spec": e.new_spec}
+        return {"new_content": e.new, "diff": e.diff, "old_spec": e.old_spec, "new_spec": e.new_spec,
+                "major_upgrade": is_breaking(e.old_spec, state["target"])}
 
     def explain(state: FixState) -> dict:
+        n = len(state.get("covers") or [1])
         fallback = (f"Upgrades {state['package']} from {state['old_spec']} to {state['new_spec']} in "
-                    f"{state['manifest_path']}, the first version that fixes {state['advisory'] or 'the advisory'} "
+                    f"{state['manifest_path']}, the lowest version that fixes "
+                    f"{'all ' + str(n) + ' open advisories' if n > 1 else (state['advisory'] or 'the advisory')} "
                     f"({state['summary']}).")
+        if state.get("major_upgrade"):
+            fallback += (" This is a major-version upgrade: expect breaking changes; check the package's "
+                         "release notes and run the tests before merging.")
         if deps.llm is None:
             return {"rationale": fallback}
         try:
@@ -108,9 +129,11 @@ def build_graph(deps: FixDeps, checkpointer):
                 {"role": "system", "content": "Write a 2-3 sentence pull request description for a security "
                  "dependency upgrade. Plain words, no markdown headings, no claims beyond the facts given."},
                 {"role": "user", "content": f"Package: {state['package']}\nChange: {state['old_spec']} -> "
-                 f"{state['new_spec']}\nFile: {state['manifest_path']}\nAdvisory: {state['advisory']}\n"
-                 f"Problem: {state['summary']}"}])
+                 f"{state['new_spec']}\nFile: {state['manifest_path']}\nAdvisories: {state['advisory']}\n"
+                 f"Problem: {state['summary']}\nMajor-version upgrade: {bool(state.get('major_upgrade'))}"}])
             text = (resp.text or "").strip()
+            if text and state.get("major_upgrade") and "major" not in text.lower():
+                text += " This is a major-version upgrade: expect breaking changes."   # never left out
             return {"rationale": text[:800] if text else fallback}
         except Exception:  # noqa: BLE001
             log.warning("rationale model call failed; using template", exc_info=True)
@@ -120,7 +143,8 @@ def build_graph(deps: FixDeps, checkpointer):
         # Its own node: LangGraph re-runs an interrupted node from the top on resume, so a write
         # placed before interrupt() would overwrite the lead's approval.
         update(state, status="awaiting_approval", manifest_path=state["manifest_path"], diff=state["diff"],
-               new_content=state["new_content"], rationale=state["rationale"])
+               new_content=state["new_content"], rationale=state["rationale"], package=state["package"],
+               covers=state.get("covers") or [state["fingerprint"]], major_upgrade=bool(state.get("major_upgrade")))
         return {}
 
     def await_approval(state: FixState) -> dict:

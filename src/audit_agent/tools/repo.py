@@ -15,7 +15,7 @@ def _check_repo(ctx: ToolContext, repo: str) -> None:
     with ctx.db.scoped(ctx.scope) as conn:
         row = conn.execute("select team_id from repo_owners where repo = %s", (repo,)).fetchone()
     if not ctx.scope.is_admin and (not row or row["team_id"] not in ctx.scope.team_ids):
-        raise ToolError(f"Repo '{repo}' is not owned by a team in your scope.")
+        raise ToolError("That repository is not owned by a team in your scope.")   # name not echoed back
 
 
 class ReadFileArgs(Args):
@@ -34,7 +34,7 @@ class ReadFileArgs(Args):
     "read_repo_file",
     "Read a file from one of your team's repos (default branch), e.g. a manifest, lockfile or "
     "CODEOWNERS. Large files are truncated.",
-    ReadFileArgs, {"investigate"}, untrusted=True,
+    ReadFileArgs, {"investigate", "chat"}, untrusted=True,
 )
 def read_repo_file(ctx: ToolContext, a: ReadFileArgs) -> ToolResult:
     _check_repo(ctx, a.repo)
@@ -57,7 +57,7 @@ class SearchCodeArgs(Args):
     "search_code",
     "Search one of your team's repos for an identifier, e.g. whether the vulnerable function is "
     "imported. An empty result is weak evidence, not proof of non-use.",
-    SearchCodeArgs, {"investigate"}, untrusted=True,
+    SearchCodeArgs, {"investigate", "chat"}, untrusted=True,
 )
 def search_code(ctx: ToolContext, a: SearchCodeArgs) -> ToolResult:
     _check_repo(ctx, a.repo)
