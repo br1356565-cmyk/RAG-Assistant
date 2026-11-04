@@ -509,22 +509,29 @@ locals {
     audit_runtime = "${local.name}-runtime-audit"
     fix_runtime   = var.fix_agent_enabled ? "${local.name}-runtime-fix" : ""
   }
-  role_session = { for k, n in local.role_names : k => "arn:${local.partition}:sts::${local.account_id}:assumed-role/${n}/*" if n != "" }
+  # principal.id is the caller's IAM ARN. Match every form it may take for that one role:
+  # the assumed-role ARN without a session name (what AgentCore's own examples show), with
+  # one, and the plain role ARN. All three are pinned to the same role name.
+  role_session = { for k, n in local.role_names : k => [
+    "arn:${local.partition}:sts::${local.account_id}:assumed-role/${n}",
+    "arn:${local.partition}:sts::${local.account_id}:assumed-role/${n}/*",
+    "arn:${local.partition}:iam::${local.account_id}:role/${n}",
+  ] if n != "" }
 
   policy_sets = { for name, p in {
     read_tools = {
       description = "Chat and investigation agents may use the GitHub read tools"
-      callers     = [local.role_session.chat, local.role_session.investigate, local.role_session.audit_runtime]
+      callers     = tolist([for c in flatten([local.role_session.chat, local.role_session.investigate, local.role_session.audit_runtime]) : c])
       targets     = tolist([for t, v in local.tool_targets : t if contains(["read", "read+fix"], v.callers)])
     }
     ops_tools = {
       description = "Only the chat agent may run server diagnostics"
-      callers     = [local.role_session.chat, local.role_session.audit_runtime]
+      callers     = tolist([for c in flatten([local.role_session.chat, local.role_session.audit_runtime]) : c])
       targets     = tolist([for t, v in local.tool_targets : t if v.callers == "chat"])
     }
     fix_tools = {
       description = "Only the fix agent may read the manifest and open an approved fix PR"
-      callers     = compact([lookup(local.role_session, "fix_runtime", "")])
+      callers     = tolist([for c in try(local.role_session.fix_runtime, []) : c])
       targets     = tolist([for t, v in local.tool_targets : t if contains(["fix", "read+fix"], v.callers)])
     }
   } : name => p if local.agentcore && length(p.targets) > 0 && length(p.callers) > 0 }
