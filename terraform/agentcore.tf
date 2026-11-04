@@ -408,11 +408,31 @@ resource "aws_iam_role_policy" "gateway" {
     Version = "2012-10-17"
     Statement = [
       { Effect = "Allow", Action = "lambda:InvokeFunction", Resource = aws_lambda_alias.tools[0].arn },
+      # Policy checks run as this role and are authorized against BOTH the policy engine and
+      # the gateway. The gateway's ARN is a name pattern: the gateway depends on this policy,
+      # so it can't reference its own ARN (cycle). AWS appends a random suffix to the name.
       { Effect = "Allow",
-        Action = ["bedrock-agentcore:AuthorizeAction", "bedrock-agentcore:PartiallyAuthorizeActions", "bedrock-agentcore:GetPolicyEngine"],
+        Action = ["bedrock-agentcore:AuthorizeAction", "bedrock-agentcore:PartiallyAuthorizeActions"],
+        Resource = [
+          aws_bedrockagentcore_policy_engine.tools[0].policy_engine_arn,
+          "${aws_bedrockagentcore_policy_engine.tools[0].policy_engine_arn}/*",
+          "arn:${local.partition}:bedrock-agentcore:${var.aws_region}:${local.account_id}:gateway/${local.name}-tools-*",
+      ] },
+      { Effect = "Allow", Action = "bedrock-agentcore:GetPolicyEngine",
       Resource = [aws_bedrockagentcore_policy_engine.tools[0].policy_engine_arn, "${aws_bedrockagentcore_policy_engine.tools[0].policy_engine_arn}/*"] },
     ]
   })
+}
+
+# IAM changes take a few seconds to reach AgentCore's checks; the gateway is validated
+# against this role the moment it is created.
+resource "terraform_data" "gateway_iam_propagation" {
+  count            = local.agentcore ? 1 : 0
+  triggers_replace = [aws_iam_role_policy.gateway[0].policy]
+
+  provisioner "local-exec" {
+    command = "sleep 20"
+  }
 }
 
 resource "aws_bedrockagentcore_policy_engine" "tools" {
@@ -434,7 +454,7 @@ resource "aws_bedrockagentcore_gateway" "tools" {
     mode = var.agentcore_policy_mode
   }
 
-  depends_on = [aws_iam_role_policy.gateway]
+  depends_on = [aws_iam_role_policy.gateway, terraform_data.gateway_iam_propagation]
 }
 
 resource "aws_bedrockagentcore_gateway_target" "tool" {
