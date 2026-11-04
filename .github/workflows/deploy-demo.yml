@@ -108,7 +108,7 @@ jobs:
 
       - name: Check inputs
         env:
-          DEMO_TFVARS: terraform.tfvars
+          DEMO_TFVARS: ${{ secrets.DEMO_TFVARS }}
         run: |
           if [ -n "$DEMO_TFVARS" ]; then
             printf '%s\n' "$DEMO_TFVARS" > terraform.tfvars

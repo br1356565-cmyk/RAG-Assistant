@@ -1,18 +1,11 @@
-<<<<<<< HEAD
 # Demo stack in the personal AWS account (Sydney), with personal GitHub repos and Entra tenant.
 # Terraform loads this file automatically; the deploy-demo workflow uses it unless the
 # DEMO_TFVARS secret is set. No secrets here: keys live in Secrets Manager.
 # Steps: local/DEPLOY-DEMO.md. Expected cost: ~$25-40/month; destroy after the demo.
-=======
-# Demo in a fresh personal AWS account, with your own GitHub repos and a personal Entra
-# tenant. Copy to demo.tfvars (git-ignored) and fill in the <...> values.
-# Steps: local/DEPLOY-DEMO.md. Expected cost: ~$25/month; destroy after the demo.
->>>>>>> 712f32068c75441bbfa1a5d2b1fab2db851764f7
 
 aws_region  = "ap-southeast-2"
 name_prefix = "audit-demo"
 
-<<<<<<< HEAD
 # Network: create everything, with a t4g.micro NAT instance instead of a NAT gateway.
 create_vpc        = true
 nat_mode          = "instance"
@@ -23,22 +16,10 @@ nat_instance_type = "t4g.micro" # Free plan: only free-tier-eligible instance ty
 llm_backend       = "bedrock"
 chat_model        = "apac.amazon.nova-pro-v1:0"
 batch_model       = "apac.amazon.nova-pro-v1:0"
-=======
-# Network: create everything, with a t4g.nano NAT instance instead of a NAT gateway.
-create_vpc = true
-nat_mode   = "instance"
-
-# Models: Bedrock directly (no LiteLLM gateway in this account). Use the inference-profile
-# ids shown in the Bedrock console (Model catalog -> model -> "Inference profile ID").
-llm_backend = "bedrock"
-chat_model  = "apac.amazon.nova-pro-v1:0"
-batch_model = "apac.amazon.nova-pro-v1:0"
->>>>>>> 712f32068c75441bbfa1a5d2b1fab2db851764f7
 chat_temperature  = "none"
 batch_temperature = "none"
 
 # Small and disposable.
-<<<<<<< HEAD
 db_instance_class        = "db.t3.micro"
 db_backup_retention_days = 1 # Free plan maximum
 db_deletion_protection   = false
@@ -47,26 +28,13 @@ secret_recovery_days     = 0
 force_destroy_buckets    = true
 log_retention_days       = 7
 raw_retention_days       = 30
-=======
-db_instance_class      = "db.t3.micro"
-db_deletion_protection = false
-db_skip_final_snapshot = true
-secret_recovery_days   = 0
-force_destroy_buckets  = true
-log_retention_days     = 7
-raw_retention_days     = 30
->>>>>>> 712f32068c75441bbfa1a5d2b1fab2db851764f7
 
 # New accounts often have a Lambda concurrency limit of 10, which leaves no room to reserve.
 chat_reserved_concurrency   = -1
 investigate_max_concurrency = 2
 max_investigations_per_run  = 20
 
-<<<<<<< HEAD
 # Identity: personal Entra tenant (DEPLOY-DEMO.md, step 3).
-=======
-# Identity: your own Entra tenant (see DEPLOY-DEMO.md, step 2).
->>>>>>> 712f32068c75441bbfa1a5d2b1fab2db851764f7
 entra_tenant_id = "42919981-4639-4573-aca3-da94a49690e9"
 entra_client_id = "2a5b800c-5fb9-443a-add3-85adad30507e"
 allowed_cidrs   = [] # no WAF ($6/month); the app still requires an Entra login
@@ -76,26 +44,12 @@ team_group_ids = {
   platform = "949d6356-6288-4fbe-8c63-f27ffcf8b644"
 }
 
-<<<<<<< HEAD
 # GitHub: the read-only App installed on the personal account.
-=======
-# GuardDuty is optional: enable it in the console first (trial on the paid plan only), generate sample
-# findings, then add "guardduty" here.
-collectors        = ["ownership", "dependabot"]
-guardduty_regions = ["us-east-1"]
-
-# Spend guard.
-alarm_email             ="rameshbalaji256001@gmail.com"   # your real address
-nat_instance_type        = "t4g.micro"
-db_backup_retention_days = 1
-monthly_budget_usd = 30
->>>>>>> 712f32068c75441bbfa1a5d2b1fab2db851764f7
 github_org             = "br1356565-cmyk"
 github_owner_type      = "user"
 github_app_id          = "5594367"
 github_installation_id = "178167841"
 ownership_config       = "ownership.demo.yml"
-<<<<<<< HEAD
 
 # GuardDuty is optional: enable it in the console first, generate sample findings, then add
 # "guardduty" here.
@@ -127,5 +81,3 @@ diagnostics_enabled = false
 # Spend guard.
 alarm_email        = "rameshbalaji256001@gmail.com"
 monthly_budget_usd = 30
-=======
->>>>>>> 712f32068c75441bbfa1a5d2b1fab2db851764f7
