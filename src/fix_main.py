@@ -49,4 +49,6 @@ def build():
 if __name__ == "__main__":
     from bedrock_agentcore.runtime.a2a import serve_a2a
 
-    serve_a2a(build())
+    from fix_agent.a2a_server import context_builder
+
+    serve_a2a(build(), context_builder=context_builder())

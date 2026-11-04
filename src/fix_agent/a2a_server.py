@@ -59,3 +59,23 @@ class FixExecutor(AgentExecutor):
 
     async def cancel(self, context, event_queue) -> None:
         raise NotImplementedError("fix requests are cancelled by rejecting them")
+
+
+def context_builder():
+    """The SDK's context builder, plus a default A2A protocol version.
+
+    AgentCore Runtime forwards only allowlisted request headers to the agent, so the
+    client's `A2A-Version: 1.0` header may not arrive; a request without it is treated as
+    protocol 0.3 and refused by the 1.0 handler. Our only client speaks 1.0, so a missing
+    version means 1.0. An explicit version header is left as sent."""
+    from bedrock_agentcore.runtime.a2a import BedrockCallContextBuilder
+
+    class DefaultVersionContextBuilder(BedrockCallContextBuilder):
+        def build(self, request):
+            ctx = super().build(request)
+            headers = ctx.state.setdefault("headers", {})
+            if not any(k.lower() == "a2a-version" for k in headers):
+                headers["A2A-Version"] = "1.0"
+            return ctx
+
+    return DefaultVersionContextBuilder()

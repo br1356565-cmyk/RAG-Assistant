@@ -528,3 +528,23 @@ def test_gateway_tool_names_follow_terraform(monkeypatch):
     assert gateway_tool_names(include_write=True)["open_fix_pr"] == "gh-write___open_fix_pr"
     monkeypatch.setenv("GATEWAY_TOOLS", json.dumps({"read_repo_file": "t1___read_repo_file", "open_fix_pr": "t2___open_fix_pr"}))
     assert gateway_tool_names() == {"read_repo_file": "t1___read_repo_file"}
+
+
+def test_a2a_server_accepts_requests_without_a_version_header(db, fix_service):
+    """AgentCore Runtime may drop the A2A-Version header; the fix agent must still answer."""
+    import uuid as _uuid
+
+    from bedrock_agentcore.runtime.a2a import build_a2a_app
+    from starlette.testclient import TestClient
+
+    from fix_agent.a2a_server import FixExecutor, context_builder
+
+    service, _ = fix_service
+    text = json.dumps({"action": "draft", "fingerprint": G_CRIT, "scope_token": sign(GROWTH, KEY)})
+    body = {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": {"message": {
+        "messageId": str(_uuid.uuid4()), "role": "ROLE_USER", "parts": [{"text": text}]}}}
+    bare = TestClient(build_a2a_app(FixExecutor(service, KEY))).post("/", json=body).json()
+    assert "not supported" in bare["error"]["message"]              # what the Runtime caused
+    fixed = TestClient(build_a2a_app(FixExecutor(service, KEY), context_builder=context_builder()))
+    out = fixed.post("/", json=body).json()
+    assert "error" not in out and "awaiting_approval" in json.dumps(out)
