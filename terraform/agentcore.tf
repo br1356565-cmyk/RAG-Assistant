@@ -75,10 +75,10 @@ locals {
   tool_targets  = { for k, v in local.all_tool_targets : k => v if v.enabled }
   gateway_tools = { for t, v in local.tool_targets : v.tool => "${t}___${v.tool}" }
 
-  runtime_url = local.agentcore ? {
-    audit = "https://bedrock-agentcore.${var.aws_region}.amazonaws.com/runtimes/${urlencode(aws_bedrockagentcore_agent_runtime.audit[0].agent_runtime_arn)}/invocations?qualifier=DEFAULT"
-    fix   = var.fix_agent_enabled ? "https://bedrock-agentcore.${var.aws_region}.amazonaws.com/runtimes/${urlencode(aws_bedrockagentcore_agent_runtime.fix[0].agent_runtime_arn)}/invocations/?qualifier=DEFAULT" : null
-  } : { audit = null, fix = null }
+  # Two separate locals on purpose: a local is one node in Terraform's graph, and the audit
+  # runtime's environment needs the fix URL while the chat Lambda needs the audit URL.
+  audit_runtime_url = local.agentcore ? "https://bedrock-agentcore.${var.aws_region}.amazonaws.com/runtimes/${urlencode(aws_bedrockagentcore_agent_runtime.audit[0].agent_runtime_arn)}/invocations?qualifier=DEFAULT" : null
+  fix_runtime_url   = local.agentcore && var.fix_agent_enabled ? "https://bedrock-agentcore.${var.aws_region}.amazonaws.com/runtimes/${urlencode(aws_bedrockagentcore_agent_runtime.fix[0].agent_runtime_arn)}/invocations/?qualifier=DEFAULT" : null
 
   # Environment the Lambdas and the audit runtime share when AgentCore is on (nulls dropped).
   agentcore_env = { for k, v in {
@@ -86,7 +86,7 @@ locals {
     GATEWAY_MCP_URL     = local.agentcore ? aws_bedrockagentcore_gateway.tools[0].gateway_url : null
     GATEWAY_TOOLS       = local.agentcore ? jsonencode(local.gateway_tools) : null
     SCOPE_KEY_SECRET    = local.agentcore ? aws_secretsmanager_secret.scope_key[0].arn : null
-    FIX_AGENT_URL       = local.runtime_url.fix
+    FIX_AGENT_URL       = local.fix_runtime_url
     DIAGNOSTICS_ENABLED = var.diagnostics_enabled ? "true" : null
   } : k => v if v != null }
 

@@ -35,7 +35,7 @@ locals {
 
   # With AgentCore on, chat forwards questions to the Runtime agent and releases review gates.
   chat_agentcore_env = merge(local.agentcore_env, { for k, v in {
-    AGENT_RUNTIME_URL = local.runtime_url.audit
+    AGENT_RUNTIME_URL = local.audit_runtime_url
     STATE_MACHINE_ARN = local.state_machine_arn
   } : k => v if v != null })
   # Investigations use the Gateway tools but not memory, the fix agent or diagnostics.
