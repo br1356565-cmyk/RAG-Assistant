@@ -6,6 +6,7 @@ Routes (CloudFront forwards /api/* here; all need header x-user-authorization: B
        without one       -> 200 {"session_id", "answer", "cited", "status", "as_of", "steps"}
   GET  /api/chat/job?id=  -> {"status": "running"|"done"|"error", "steps": [...], "result": {...}}
   GET  /api/brief         -> the weekly brief for the signed-in user's teams
+  GET  /api/findings      -> every visible finding, filtered and paged, with its fix status
 
 Why jobs: a Python Lambda can't stream its response, so progress ("Checking GitHub advisory
 GHSA-...") is written to the chat_jobs table as the agent works and the page polls for it.
@@ -57,7 +58,7 @@ def handler(event: dict, context) -> dict:
     method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "POST")
     path = str(event.get("rawPath", ""))
     if method == "GET" and path.endswith("/api/brief"):
-        return _resp(200, brief.build(deps.db, scope, top_n=2 if scope.is_admin else 3))
+        return _resp(200, brief.build(deps.db, scope))
     if method == "GET" and path.endswith("/api/chat/job"):
         return _job_status(deps, scope, (event.get("queryStringParameters") or {}).get("id", ""))
     route = api.ROUTES.get((method, path.split("/api/", 1)[-1] if "/api/" in path else ""))

@@ -191,6 +191,10 @@
   let current = null;
   function show(view) {
     if (!document.getElementById(`view-${view}`)) view = "brief";
+    const link = document.querySelector(`nav a[data-view="${view}"]`);
+    if (link && link.hidden) view = "brief";                     // admin-only views for others
+    if (location.hash.slice(1) !== view) history.replaceState(null, "", `#${view}`);   // keep the URL honest
+
     document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${view}`; });
     document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.view === view));
     $("top-title").textContent = document.getElementById(`view-${view}`).dataset.title;
@@ -212,7 +216,7 @@
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
     if (e.key === "Escape") { document.body.classList.remove("nav-open"); if (typing) e.target.blur(); return; }
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
-    const go = { b: "brief", c: "chat", i: "infra", r: "review", n: "conventions" };
+    const go = { b: "brief", f: "findings", c: "chat", i: "infra", r: "review", n: "conventions" };
     if (pendingG && Date.now() - pendingG < 1200 && go[e.key]) { location.hash = go[e.key]; pendingG = 0; e.preventDefault(); return; }
     pendingG = 0;
     if (e.key === "g") { pendingG = Date.now(); return; }
@@ -239,9 +243,36 @@
   }
 
   // ── Weekly brief ────────────────────────────────────────────────────────
-  function fixButton(findingId) {
+  // Where a finding's fix stands. One request can cover several findings (same package).
+  const fixInfo = {
+    drafting: ["Fix being drafted", "info"], awaiting_approval: ["Fix waiting for a lead", "warn"],
+    approved: ["Approved, opening PR", "info"], opened: ["Fix PR opened", "ok"],
+    rejected: ["Fix rejected", "bad"], failed: ["Fix failed", "bad"],
+  };
+  const canDraft = (it) => it.source === "dependabot" && cfg.fixAgent !== false
+    && (!it.fix_request || ["rejected", "failed"].includes(it.fix_request.status));
+
+  function fixLine(fr) {
+    const row = el("div", "fixline");
+    const [label, kind] = fixInfo[fr.status] || [fr.status, "neutral"];
+    row.appendChild(chip(label, kind));
+    if (fr.major_upgrade) row.appendChild(chip("major upgrade", "warn"));
+    if (fr.pr_url) {
+      const a = el("a", null, fr.pr_url.startsWith("file:") ? "dry-run PR" : "View PR");
+      a.href = fr.pr_url; a.target = "_blank"; a.rel = "noopener";
+      row.appendChild(a);
+    } else if (fr.status === "awaiting_approval") {
+      const a = el("a", null, "Open in Review"); a.href = "#review";
+      row.appendChild(a);
+    }
+    if (fr.error) row.appendChild(el("span", "muted", fr.error));
+    row.appendChild(el("span", "muted", `${fr.requested_by ? `by ${fr.requested_by} · ` : ""}${ago(fr.updated_at)}`));
+    return row;
+  }
+
+  function fixButton(findingId, label) {
     const wrap = el("span");
-    const b = button("Draft a fix", "small ghost", async () => {
+    const b = button(label || "Draft a fix", "small ghost", async () => {
       b.disabled = true;
       try {
         const { data } = await postJSON("/api/fixes/request", { finding_id: findingId });
@@ -261,7 +292,7 @@
       e.target.remove();
       inlineForm(item, "What is wrong? (the next run re-investigates it)", "Send", async (note) => {
         await postJSON("/api/findings/dispute", { finding_id: findingId, note });
-        return "Thanks: hidden from the brief until it is re-checked or a lead approves it.";
+        return "Thanks: its explanation is hidden until the next run re-checks it (or a lead approves it).";
       });
     });
   }
@@ -311,16 +342,119 @@
         if (it.investigated_on) {
           item.appendChild(el("div", "meta", `Investigated ${it.investigated_on} · impact ${it.impact} · confidence ${it.confidence}`));
         }
+        if (it.fix_request) item.appendChild(fixLine(it.fix_request));
         const actions = el("div", "actions");
         if (it.summary) actions.appendChild(disputeButton(item, it.id));
-        if (it.source === "dependabot" && cfg.fixAgent !== false) actions.appendChild(fixButton(it.id));
+        if (canDraft(it)) actions.appendChild(fixButton(it.id, it.fix_request ? "Draft again" : "Draft a fix"));
         if (actions.childElementCount) item.appendChild(actions);
         card.appendChild(item);
+      }
+      if (t.open_total > t.top.length) {
+        const a = el("a", "see-all", `See all ${t.open_total} open findings →`);
+        a.href = "#findings";
+        a.addEventListener("click", () => { findingsState.team = t.id; findingsState.page = 1; });
+        card.appendChild(a);
       }
       box.appendChild(card);
     }
   }
   loaders.brief = loadBrief;
+
+  // ── Findings (everything, not just the brief's top few) ──────────────────
+  const SEVS = ["critical", "high", "medium", "low", "info"];
+  const findingsState = { q: "", sev: [], source: "", team: "", fix: "", status: "open", page: 1 };
+  let findingsTimer = 0;
+
+  function syncFilters(data) {
+    const src = $("f-source");
+    if (src.options.length === 1) {
+      data.sources.forEach((x) => { const o = el("option", null, x); o.value = x; src.appendChild(o); });
+    }
+    src.value = findingsState.source;
+    const team = $("f-team");
+    if (!team.options.length) {
+      const all = el("option", null, "All my teams"); all.value = ""; team.appendChild(all);
+      data.teams.forEach((x) => { const o = el("option", null, x); o.value = x; team.appendChild(o); });
+      team.hidden = data.teams.length < 2;
+    }
+    team.value = findingsState.team;
+    $("f-fix").value = findingsState.fix;
+    $("f-status").value = findingsState.status;
+    if (document.activeElement !== $("f-q")) $("f-q").value = findingsState.q;   // never clobber typing
+    document.querySelectorAll("#f-sev button").forEach((b) => b.setAttribute("aria-pressed", String(findingsState.sev.includes(b.dataset.sev))));
+  }
+
+  let findingsSeq = 0;
+  async function loadFindings() {
+    const box = $("findings");
+    const seq = ++findingsSeq;                                   // only the latest response renders
+    const p = new URLSearchParams({ status: findingsState.status, page: String(findingsState.page), size: "50" });
+    if (findingsState.q) p.set("q", findingsState.q);
+    if (findingsState.sev.length) p.set("severity", findingsState.sev.join(","));
+    for (const k of ["source", "team", "fix"]) if (findingsState[k]) p.set(k, findingsState[k]);
+    let data;
+    try { data = await getJSON(`/api/findings?${p}`); } catch (err) {
+      if (seq === findingsSeq) box.replaceChildren(el("div", "error-box", err.message));
+      return;
+    }
+    if (!data || seq !== findingsSeq) return;
+    syncFilters(data);
+    const from = data.total ? (data.page - 1) * data.size + 1 : 0;
+    const to = Math.min(data.total, data.page * data.size);
+    $("findings-sub").textContent = data.total
+      ? `${data.total} finding${data.total > 1 ? "s" : ""} · showing ${from}–${to} · most severe first`
+      : "No findings match these filters.";
+    const list = el("div", "card flist");
+    if (!data.findings.length) list.appendChild(el("div", "empty", "Nothing here. 🎉"));
+    for (const it of data.findings) {
+      const row = el("div", "frow");
+      row.appendChild(el("span", `sev sev-${it.severity}`, it.severity));
+      const mid = el("div");
+      mid.appendChild(el("div", "t", it.title));
+      mid.appendChild(el("div", "muted", [it.resource, it.team || "unowned", it.source,
+        it.status === "open" ? `open ${it.open_days} days` : it.status, it.id].join(" · ")));
+      if (it.summary) mid.appendChild(el("div", "reasoning", it.summary));
+      else if (it.fix) mid.appendChild(el("div", "reasoning", `Fix: ${it.fix}`));
+      row.appendChild(mid);
+      const fixc = el("div", "fixcell");
+      if (it.fix_request) fixc.appendChild(fixLine(it.fix_request));
+      if (it.status === "open" && canDraft(it)) fixc.appendChild(fixButton(it.id, it.fix_request ? "Draft again" : "Draft a fix"));
+      if (it.url) { const a = el("a", "muted", "Source"); a.href = it.url; a.target = "_blank"; a.rel = "noopener"; fixc.appendChild(a); }
+      row.appendChild(fixc);
+      list.appendChild(row);
+    }
+    box.replaceChildren(list);
+    const pager = $("findings-pager");
+    pager.replaceChildren();
+    const pages = Math.max(1, Math.ceil(data.total / data.size));
+    if (pages > 1) {
+      const prev = button("← Previous", "small ghost", () => { findingsState.page -= 1; loadFindings(); window.scrollTo(0, 0); });
+      const next = button("Next →", "small ghost", () => { findingsState.page += 1; loadFindings(); window.scrollTo(0, 0); });
+      prev.disabled = data.page <= 1; next.disabled = data.page >= pages;
+      pager.append(prev, el("span", "muted", `Page ${data.page} of ${pages}`), next);
+    }
+  }
+  loaders.findings = loadFindings;
+
+  (function setupFindingsFilters() {
+    const sev = $("f-sev");
+    for (const x of SEVS) {
+      const b = button(x, "", () => {
+        const on = findingsState.sev.includes(x);
+        findingsState.sev = on ? findingsState.sev.filter((y) => y !== x) : [...findingsState.sev, x];
+        findingsState.page = 1; loadFindings();
+      });
+      b.dataset.sev = x; b.setAttribute("aria-pressed", "false");
+      sev.appendChild(b);
+    }
+    const bind = (id, key) => $(id).addEventListener("change", (e) => { findingsState[key] = e.target.value; findingsState.page = 1; loadFindings(); });
+    bind("f-source", "source"); bind("f-team", "team"); bind("f-fix", "fix"); bind("f-status", "status");
+    $("f-q").addEventListener("input", (e) => {
+      clearTimeout(findingsTimer);
+      findingsTimer = setTimeout(() => { findingsState.q = e.target.value.trim(); findingsState.page = 1; loadFindings(); }, 300);
+    });
+    $("findings-filters").addEventListener("submit", (e) => e.preventDefault());
+  })();
 
   // ── Review ──────────────────────────────────────────────────────────────
   const decisionLabel = { approved: "Approved", rejected: "Rejected", active: "Approved", opened: "PR opened" };
@@ -419,8 +553,12 @@
       item.appendChild(el("div", "muted", `${n > 1 ? `Fixes ${n} findings for ${f.package}` : f.finding} · requested by ${f.requested_by}`));
       if (f.rationale) item.appendChild(el("div", null, f.rationale));
       item.appendChild(diffBlock(f.diff));
-      if (data.can_decide) decide(item, "/api/fixes/decide", { fix_request_id: f.fix_request_id },
-                                  [["Approve and open PR", "approved", "small"], ["Reject", "rejected", "small danger"]]);
+      if (data.can_decide && f.own) {
+        item.appendChild(el("div", "muted", "You requested this fix; another lead or an admin approves it."));
+      } else if (data.can_decide) {
+        decide(item, "/api/fixes/decide", { fix_request_id: f.fix_request_id, content_sha256: f.content_sha256 },
+               [["Approve and open PR", "approved", "small"], ["Reject", "rejected", "small danger"]]);
+      }
       return item;
     });
   }
@@ -586,7 +724,7 @@
 
   // ── Infra requests (Terraform drafter) ─────────────────────────────────
   const statusChip = {
-    drafting: ["Drafting", "info"], needs_input: ["Needs your answer", "warn"], awaiting_approval: ["Waiting for a lead", "warn"],
+    drafting: ["Drafting", "info"], needs_input: ["Needs your answer", "warn"], awaiting_approval: ["Waiting for approval", "warn"],
     approved: ["Approved", "ok"], opened: ["PR opened", "ok"], rejected: ["Rejected", "bad"], failed: ["Failed", "bad"],
   };
   const decisionInfo = { new: ["＋", "New Terraform"], reuse: ["↺", "Reuse what exists"], refuse: ["✕", "Shouldn't be built"] };
@@ -599,9 +737,8 @@
       $("infra-list").replaceChildren(el("div", "muted", err.message)); return;
     }
     if (!data) return;
-    const teamSel = $("infra-team");
-    teamSel.replaceChildren(...data.teams.map((t) => { const o = el("option", null, t); o.value = t; return o; }));
-    teamSel.hidden = data.teams.length < 2;
+    $("infra-repos").replaceChildren(...data.repos.map((x) => { const o = el("option"); o.value = x; return o; }));
+    if (!$("infra-repo").value) $("infra-repo").value = data.default_repo;
     const list = $("infra-list");
     list.replaceChildren();
     if (!data.requests.length) list.appendChild(el("div", "muted", "No requests yet."));
@@ -614,7 +751,7 @@
       m.append(chip(label, kind));
       if (r.decision) m.append(chip(r.decision, "neutral"));
       if (r.warnings) m.append(chip(`${r.warnings} warning${r.warnings > 1 ? "s" : ""}`, "warn"));
-      m.append(el("span", "muted", `${r.team} · ${ago(r.created_at)}`));
+      m.append(el("span", "muted", `${r.repo} · ${ago(r.created_at)}`));
       b.appendChild(m);
       b.addEventListener("click", () => selectInfra(r.request_id));
       list.appendChild(b);
@@ -636,7 +773,7 @@
     const head = el("div", "card");
     const [label, kind] = statusChip[r.status] || [r.status, "neutral"];
     const top = el("div", "item-title");
-    top.append(chip(label, kind), el("span", "muted", `${r.team_id} · requested by ${r.requested_by} · ${ago(r.created_at)}`));
+    top.append(chip(label, kind), el("span", "muted", `${r.repo} · requested by ${r.requested_by} · ${ago(r.created_at)}`));
     head.append(top, el("div", "reasoning", r.request));
     if (r.answer) head.appendChild(el("div", "meta", `Your answer: ${r.answer}`));
     box.appendChild(head);
@@ -658,7 +795,7 @@
     if (r.status === "needs_input" && r.question) {
       const q = el("div", "card question");
       q.append(el("div", "item-title", "The drafter needs one detail"), el("div", "reasoning", r.question));
-      if (r.is_requester || r.can_decide) {
+      if (r.can_decide) {
         const ta = el("textarea", "reason");
         ta.placeholder = "Your answer";
         const st = el("span", "muted");
@@ -702,7 +839,7 @@
 
     if (r.files && r.files.length) {
       const c = el("div", "card");
-      c.appendChild(el("div", "item-title", `Files (${r.files.length}) · teams/${r.team_id}/`));
+      c.appendChild(el("div", "item-title", `Files (${r.files.length}) · ${r.repo}`));
       const diffs = String(r.diff || "").split(/(?=^--- )/m);
       r.files.forEach((f, i) => {
         const d = el("details", "file");
@@ -720,16 +857,17 @@
       if (r.can_decide) {
         c.appendChild(el("div", "item-title", "Your decision"));
         c.appendChild(el("div", "muted", r.files && r.files.length
-          ? "Approving opens a pull request with exactly these files; CI runs fmt/validate/plan there."
+          ? `Approving opens a pull request on ${r.repo} with exactly these files; review it again there before merging.`
           : "Approving confirms the drafter's conclusion; nothing is written."));
         const reason = el("textarea", "reason");
         reason.placeholder = "Reason (required to reject): it becomes a proposed convention for future drafts";
         c.appendChild(reason);
-        decide(c, "/api/infra/decide", (decision) => ({ request_id: id, reason: decision === "rejected" ? reason.value.trim() : undefined }),
+        decide(c, "/api/infra/decide", (decision) => ({ request_id: id, files_sha256: r.files_sha256,
+                                                         reason: decision === "rejected" ? reason.value.trim() : undefined }),
                [[r.files && r.files.length ? "Approve and open PR" : "Approve", "approved", "small"], ["Reject", "rejected", "small danger"]],
                () => { loadInfra(); setTimeout(() => renderInfra(id), 300); });
       } else {
-        c.appendChild(el("div", "muted", "Waiting for a team lead to approve or reject."));
+        c.appendChild(el("div", "muted", "Waiting for an admin to approve or reject."));
       }
       box.appendChild(c);
     }
@@ -761,7 +899,7 @@
     if (text.length < 10) { st.textContent = "Describe it in a sentence or two."; return; }
     $("infra-submit").disabled = true; st.textContent = "Starting…";
     try {
-      const { data } = await postJSON("/api/infra/request", { request: text, team: $("infra-team").value || undefined });
+      const { data } = await postJSON("/api/infra/request", { request: text, repo: $("infra-repo").value.trim() || undefined });
       $("infra-text").value = ""; st.textContent = "";
       infraSelected = data.request_id;
       await loadInfra();
@@ -791,7 +929,7 @@
     const row = el("div", "actions"); row.append(propose, st);
     form.append(el("div", "item-title", "Propose a convention"), ta, row);
     box.appendChild(form);
-    for (const [status, title] of [["proposed", "Waiting for a lead"], ["active", "Active: the drafter follows these"]]) {
+    for (const [status, title] of [["proposed", "Waiting for an admin"], ["active", "Active: the drafter follows these"]]) {
       const items = data.conventions.filter((c) => c.status === status);
       box.appendChild(el("h2", null, `${title} (${items.length})`));
       const card = el("div", "card");
@@ -831,10 +969,22 @@
       log.querySelectorAll(".msg").forEach((m) => m.remove());
       $("chat-empty").hidden = false;
       infraSelected = null;
+      Object.assign(findingsState, { q: "", sev: [], source: "", team: "", fix: "", status: "open", page: 1 });
+      $("f-team").replaceChildren(); $("f-source").replaceChildren(el("option", null, "All sources"));
+      $("f-source").options[0].value = "";
       $("infra-detail").replaceChildren(el("div", "card empty", "Pick a request on the left or start a new one."));
-      const v = current; current = null; show(v || "brief");
+      const v = current; current = null;
+      syncAdminNav().then(() => show(["infra", "conventions"].includes(v) && document.querySelector(`nav a[data-view=${v}]`).hidden ? "brief" : (v || "brief")));
       refreshReviewCount();
     });
+  }
+
+  // The drafter and its conventions are for security admins; the server decides, the nav follows.
+  async function syncAdminNav() {
+    let admin = false;
+    try { admin = !!(await getJSON("/api/infra")); } catch (_) { admin = false; }
+    document.querySelectorAll("nav a[data-admin]").forEach((a) => { a.hidden = !admin; });
+    if (!admin && ["infra", "conventions"].includes(current)) location.hash = "brief";
   }
 
   if (dev) setupPersonas();
@@ -842,6 +992,7 @@
   handleRedirect()
     .then(accessToken)
     .then(() => { if (!dev) $("who").textContent = store.getItem("name") || ""; })
+    .then(syncAdminNav)
     .then(() => show(location.hash.slice(1) || "brief"))
     .then(refreshReviewCount)
     .catch((err) => { show("chat"); add("bot", `Sign-in problem: ${err.message}`); });

@@ -2,8 +2,8 @@
 
   checks       the reviewer-facing checks on drafted Terraform: each case says exactly which
                checks must warn, so both misses and false alarms fail the gate
-  hard limits  submit_draft refuses paths outside teams/<team>/, other suffixes, too many
-               files, and decisions without what they need
+  hard limits  submit_draft refuses unsafe paths (.., absolute, odd characters), other
+               suffixes, too many files, and decisions without what they need
   binding      the approval hash changes when any byte of any file changes
 
 The model's judgement (reuse vs new, asking a question) is covered by the end-to-end tests
@@ -29,8 +29,8 @@ TEAM = "web"
 D = f"teams/{TEAM}/"
 TAG = f'tags = {{ team = "{TEAM}" }}'
 
-CHECK = {"files": f"Files only under {D}", "parse": "HCL parses", "tags": f'Resources tagged team = "{TEAM}"',
-         "root": "No provider/backend in the team folder", "secret": "No hard-coded secrets",
+CHECK = {"parse": "HCL parses", "tags": 'Resources have a "team" tag',
+         "root": "No provider/backend blocks", "secret": "No hard-coded secrets",
          "wildcard": 'No "*" IAM actions', "public": "No public access"}
 
 # (name, files as {path: content}, checks that must warn)
@@ -39,7 +39,8 @@ CHECK_CASES = [
      {D + "main.tf": f'module "b" {{\n  source = "../../modules/s3"\n  name = "x"\n}}\n'
                      f'resource "aws_sqs_queue" "q" {{\n  name = "q"\n  {TAG}\n}}\n'}, set()),
     ("untagged resource", {D + "q.tf": 'resource "aws_sqs_queue" "q" {\n  name = "q"\n}\n'}, {"tags"}),
-    ("wrong team in tag", {D + "q.tf": 'resource "aws_sqs_queue" "q" {\n  tags = { team = "data" }\n}\n'}, {"tags"}),
+    ("any team in the tag is fine", {D + "q.tf": 'resource "aws_sqs_queue" "q" {\n  tags = { team = "data" }\n}\n'}, set()),
+    ("empty team tag", {D + "q.tf": 'resource "aws_sqs_queue" "q" {\n  tags = { team = "" }\n}\n'}, {"tags"}),
     ("sub-resources need no tags",
      {D + "b.tf": f'resource "aws_s3_bucket" "b" {{\n  bucket = "b"\n  {TAG}\n}}\n'
                   'resource "aws_s3_bucket_versioning" "v" {\n  bucket = aws_s3_bucket.b.id\n'
@@ -76,14 +77,14 @@ CHECK_CASES = [
                   '  block_public_acls = false\n}\n'}, {"public"}),
     ("broken HCL", {D + "x.tf": 'resource "aws_sqs_queue" "q" {\n  name = \n'}, {"parse"}),
     ("README only", {D + "README.md": "# web stack\n"}, set()),
-    ("file outside the team folder", {"teams/data/x.tf": f'resource "aws_sqs_queue" "q" {{\n  {TAG}\n}}\n'}, {"files"}),
+    ("any path in the repo", {"envs/prod/x.tf": f'resource "aws_sqs_queue" "q" {{\n  {TAG}\n}}\n'}, set()),
 ]
 
 
 def check_cases() -> list[tuple[str, bool, str]]:
     out = []
     for name, files, want in CHECK_CASES:
-        got = infra_checks.run([{"path": p, "content": c} for p, c in files.items()], TEAM)
+        got = infra_checks.run([{"path": p, "content": c} for p, c in files.items()])
         failing = {k for k, label in CHECK.items() for c in got if c["name"] == label and not c["ok"]}
         detail = ", ".join(sorted(failing)) or "all ok"
         if failing != want:
@@ -94,15 +95,16 @@ def check_cases() -> list[tuple[str, bool, str]]:
 
 def limit_cases() -> list[tuple[str, bool, str]]:
     tool = REGISTRY["submit_draft"]
-    ctx = ToolContext(scope=Scope(user_id="worker:infra", team_ids=(TEAM,), role="worker"), db=None, mode="infra")
+    ctx = ToolContext(scope=Scope(user_id="worker:infra", team_ids=(), role="security_admin"), db=None, mode="infra")
     f = lambda path, content="x = 1\n": {"path": path, "content": content}  # noqa: E731
     cases = [  # (name, args, None = accepted | substring of the refusal)
         ("accepts a team file", {"decision": "new", "files": [f(D + "q.tf")]}, None),
         ("accepts reuse with no files", {"decision": "reuse"}, None),
-        ("refuses ../ escape", {"decision": "new", "files": [f(D + "../data/q.tf")]}, "bad path"),
-        ("refuses another team", {"decision": "new", "files": [f("teams/data/q.tf")]}, "must be under"),
-        ("refuses a module edit", {"decision": "new", "files": [f("modules/s3/main.tf")]}, "must be under"),
-        ("refuses prefix trick", {"decision": "new", "files": [f("teams/web2/q.tf")]}, "must be under"),
+        ("accepts any folder", {"decision": "new", "files": [f("modules/s3/main.tf"), f("envs/prod/q.tfvars")]}, None),
+        ("refuses ../ escape", {"decision": "new", "files": [f(D + "../../../etc/q.tf")]}, "bad path"),
+        ("refuses a leading ..", {"decision": "new", "files": [f("../other-repo/q.tf")]}, "bad path"),
+        ("refuses odd characters", {"decision": "new", "files": [f("a b;rm.tf")]}, "bad path"),
+        ("refuses a workflow", {"decision": "new", "files": [f(".github/workflows/x.yml")]}, "only .tf"),
         ("refuses a script", {"decision": "new", "files": [f(D + "run.sh")]}, "only .tf"),
         ("refuses a duplicate", {"decision": "new", "files": [f(D + "a.tf"), f(D + "a.tf")]}, "twice"),
         ("refuses 9 files", {"decision": "new", "files": [f(f"{D}{i}.tf") for i in range(9)]}, "Invalid arguments"),

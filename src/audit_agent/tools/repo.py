@@ -50,7 +50,9 @@ def read_repo_file(ctx: ToolContext, a: ReadFileArgs) -> ToolResult:
 
 class SearchCodeArgs(Args):
     repo: str = Field(pattern=r"^[A-Za-z0-9._-]{1,100}$")
-    query: str = Field(min_length=2, max_length=100, description="Identifier to look for, e.g. an imported function name")
+    # No quotes or ':' so the text can't carry GitHub search qualifiers (repo:, org:, user:).
+    query: str = Field(pattern=r"^[A-Za-z0-9_.$@/ -]{2,100}$",
+                       description="Identifier to look for, e.g. an imported function name (no quotes or ':')")
 
 
 @tool(

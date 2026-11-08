@@ -146,11 +146,21 @@ def _self_invoker() -> Callable[[dict], None]:
     return dispatch
 
 
-def _gateway(s: Settings) -> Callable[[tuple[str, ...]], LLM]:
+def _keys(s: Settings) -> GatewayKeys:
     if s.gateway_keys_secret:
-        keys = GatewayKeys(load_json_secret(s.gateway_keys_secret, s.aws_region))
-    else:
-        keys = GatewayKeys({"default": os.environ["GATEWAY_API_KEY"]})
+        return GatewayKeys(load_json_secret(s.gateway_keys_secret, s.aws_region))
+    return GatewayKeys({"default": os.environ["GATEWAY_API_KEY"]})
+
+
+def named_llm(s: Settings, name: str) -> LLM:
+    """One client for a component (the fix agent, the drafter) using its own LiteLLM key."""
+    if s.llm_backend != "gateway":
+        return BedrockLLM(s.aws_region)
+    return GatewayLLM(s.gateway_url, _keys(s).named(name))
+
+
+def _gateway(s: Settings) -> Callable[[tuple[str, ...]], LLM]:
+    keys = _keys(s)
     clients: dict[str, GatewayLLM] = {}
 
     def llm_for(team_ids: tuple[str, ...]) -> LLM:

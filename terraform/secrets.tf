@@ -1,5 +1,6 @@
-# Terraform creates the secret containers only. Values are set out of band so they never
-# land in Terraform state:
+# Terraform creates the secret containers only. With LiteLLM on (litellm.tf) the gateway keys
+# are filled automatically by the key bootstrap; the other values are set out of band so they
+# never land in Terraform state:
 #   aws secretsmanager put-secret-value --secret-id <arn> --secret-string file://value
 # The outputs list each ARN and the expected format.
 

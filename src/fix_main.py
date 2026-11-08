@@ -13,8 +13,7 @@ def build():
     from audit_agent.config import Settings, load_secret
     from audit_agent.db import Database
     from audit_agent.gateway_client import GatewayClient, sigv4_signer
-    from audit_agent.handlers.deps import gateway_tool_names
-    from audit_agent.llm import BedrockLLM, GatewayLLM
+    from audit_agent.handlers.deps import gateway_tool_names, named_llm
 
     from fix_agent.a2a_server import FixExecutor
     from fix_agent.graph import FixDeps
@@ -41,7 +40,7 @@ def build():
             raise RuntimeError(out["error"])
         return out["data"]
 
-    llm = BedrockLLM(s.aws_region) if s.llm_backend == "bedrock" else GatewayLLM(s.gateway_url, os.environ.get("GATEWAY_API_KEY", ""))
+    llm = named_llm(s, "fix")                  # every model call goes through LiteLLM with the fix agent's key
     saver = PostgresSaver(Database(s).conn)    # its own connection; tables created by the migrate step
     service = FixService(FixDeps(db=db, read_file=read_file, open_pr=open_pr, llm=llm, model=s.batch_model), saver)
     return FixExecutor(service, key, infra=build_infra(db, gateway, llm, s, saver))
@@ -58,8 +57,8 @@ def build_infra(db, gateway, llm, s, saver):
     from fix_agent.infra_graph import InfraDeps
     from fix_agent.infra_service import InfraService
 
-    def read_infra(scope, path):
-        out = gateway.call("read_infra_file", {"path": path}, scope)
+    def read_infra(scope, repo, path):
+        out = gateway.call("read_infra_file", {"path": path}, scope, infra_repo=repo)
         return None if "error" in out else out["data"]["content"]
 
     def open_pr(scope, request_id):
@@ -69,7 +68,9 @@ def build_infra(db, gateway, llm, s, saver):
         return out["data"]
 
     tool_deps = SimpleNamespace(gateway=gateway, aws=None, ssm=None, fix_client=None)
-    deps = InfraDeps(db=db, tools=lambda: tools_for("infra", tool_deps), llm_for=lambda teams: llm,
+    from audit_agent.handlers.deps import named_llm
+    infra_llm = named_llm(s, "infra")
+    deps = InfraDeps(db=db, tools=lambda: tools_for("infra", tool_deps), llm_for=lambda teams: infra_llm,
                      model=os.environ.get("INFRA_MODEL") or s.chat_model, read_infra=read_infra, open_pr=open_pr,
                      repo=os.environ.get("INFRA_REPO", "demo-infra-terraform"))
     return InfraService(deps, saver)

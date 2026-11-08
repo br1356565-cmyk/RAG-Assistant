@@ -172,3 +172,10 @@ class FakeGitHub:
     def search_code(self, repo, query, limit):
         self.calls.append(("search_code", repo, query))
         return [{"path": "src/server.js", "fragments": ["const http = require('example-http-lib')"]}]
+
+
+def fix_sha(deps, scope, fix_request_id):
+    """The hash the review page shows with a fix; approvals must send it back."""
+    from audit_agent.handlers import api
+    return next(f["content_sha256"] for f in api.reviews(deps, scope, {})[1]["fixes"]
+                if f["fix_request_id"] == fix_request_id)

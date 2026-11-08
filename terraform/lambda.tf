@@ -17,11 +17,11 @@ locals {
   }
   agent_env = merge(local.db_env, local.github_env, {
     DB_USER             = local.app_db_user
-    LLM_BACKEND         = var.llm_backend
-    GATEWAY_URL         = coalesce(var.gateway_url, "unused")
+    LLM_BACKEND         = local.llm_backend
+    GATEWAY_URL         = coalesce(local.llm_gateway_url, "unused")
     GATEWAY_KEYS_SECRET = aws_secretsmanager_secret.gateway_keys.arn
-    CHAT_MODEL          = var.chat_model
-    BATCH_MODEL         = var.batch_model
+    CHAT_MODEL          = local.chat_model_name
+    BATCH_MODEL         = local.batch_model_name
     CHAT_TEMPERATURE    = var.chat_temperature
     BATCH_TEMPERATURE   = var.batch_temperature
     ENTRA_TENANT_ID     = var.entra_tenant_id
@@ -51,7 +51,7 @@ locals {
   # when there is no role (coalesce() can't return "", and `cond ? {} : {...}` is a type error).
   collect_role_env = { for k, v in { SECURITY_AUDIT_ROLE_ARN = var.security_audit_role_arn } : k => v if v != null }
 
-  functions = tomap({
+  all_functions = tomap({
     chat = {
       handler = "audit_agent.handlers.chat.handler"
       # Requests through CloudFront are cut at 60 s anyway and return quickly (CHAT_ASYNC); the
@@ -128,9 +128,26 @@ locals {
       reserved = -1
       env = tomap(merge(local.db_env, {
         DB_MASTER_SECRET_ARN = aws_db_instance.db.master_user_secret[0].secret_arn
-      }))
+        }, { for k, v in {
+          LITELLM_SECRET_ARN = local.litellm ? aws_secretsmanager_secret.litellm[0].arn : null
+      } : k => v if v != null }))
+    }
+    # Creates the LiteLLM virtual keys through LiteLLM's API (litellm.tf invokes it).
+    llm_keys = {
+      handler  = "audit_agent.handlers.llm_keys.handler"
+      timeout  = 900 # waits for the Fargate task on a first apply
+      memory   = 256
+      in_vpc   = true
+      reserved = -1
+      env = tomap({
+        LITELLM_URL         = local.litellm_url
+        LITELLM_SECRET_ARN  = try(aws_secretsmanager_secret.litellm[0].arn, "")
+        GATEWAY_KEYS_SECRET = aws_secretsmanager_secret.gateway_keys.arn
+        KEY_SPEC            = local.llm_key_spec
+      })
     }
   })
+  functions = { for k, v in local.all_functions : k => v if k != "llm_keys" || local.litellm }
 }
 
 resource "aws_cloudwatch_log_group" "fn" {
@@ -182,9 +199,11 @@ resource "aws_lambda_alias" "live" {
 resource "aws_lambda_invocation" "migrate" {
   function_name = aws_lambda_function.fn["migrate"].function_name
   qualifier     = aws_lambda_alias.live["migrate"].name
-  input         = jsonencode({ schema_sha256 = filesha256("${local.src_dir}/audit_agent/sql/schema.sql") })
+  input = jsonencode({ schema_sha256 = filesha256("${local.src_dir}/audit_agent/sql/schema.sql"),
+  litellm_db = local.litellm ? var.litellm_secret_version : 0 })
 
   depends_on = [
+    aws_secretsmanager_secret_version.litellm, # the migrate step creates LiteLLM's login from it
     aws_vpc_security_group_ingress_rule.db_from_lambda,
     aws_route.private_via_instance, # create_vpc only: Secrets Manager is reached via the NAT
     aws_route.private_via_gateway,

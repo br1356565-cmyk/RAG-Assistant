@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import time
 from typing import Callable, Protocol
 
@@ -24,6 +25,7 @@ import jwt
 
 API = "https://api.github.com"
 SEARCH_SPACING_S = 6.5
+SEARCH_QUERY_RE = re.compile(r"[A-Za-z0-9_.$@/ -]{1,100}")
 MAX_RETRIES = 3
 
 
@@ -209,16 +211,23 @@ class GitHubApp:
         return data.get("content")
 
     def search_code(self, repo: str, query: str, limit: int) -> list[dict]:
+        # The query is quoted (callers reject quotes and qualifiers) so it can't add a second
+        # `repo:`/`org:` qualifier, which GitHub would OR in; hits are re-checked by repo anyway.
+        if not SEARCH_QUERY_RE.fullmatch(query):
+            raise ValueError("search text may only contain letters, digits, spaces and _ . - / $ @")
         gap = SEARCH_SPACING_S - (time.monotonic() - self._last_search)
         if self._last_search and gap > 0:
             self._sleep(gap)
         self._last_search = time.monotonic()
         data = self._get(
-            "/search/code", params={"q": f"{query} repo:{self.org}/{repo}", "per_page": limit},
+            "/search/code", params={"q": f'"{query}" repo:{self.org}/{repo}', "per_page": limit},
             accept="application/vnd.github.text-match+json",
         ) or {}
+        want = f"{self.org}/{repo}".lower()
         out = []
         for item in data.get("items", [])[:limit]:
+            if ((item.get("repository") or {}).get("full_name") or "").lower() != want:
+                continue
             out.append({
                 "path": item.get("path"),
                 "fragments": [m.get("fragment", "") for m in item.get("text_matches", [])][:3],

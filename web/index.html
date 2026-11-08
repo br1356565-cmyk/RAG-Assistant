@@ -9,6 +9,7 @@
     try { const t = localStorage.getItem("theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (_) {}
   </script>
   <style>
+    [hidden] { display: none !important; }   /* author display rules must not un-hide elements */
     :root {
       --bg:#f6f6f3; --panel:#ffffff; --panel-2:#fbfbf9; --ink:#1c1c1a; --ink-2:#3d3d39; --muted:#6c6c66; --line:#e4e3dd;
       --accent:#2f5bd3; --accent-ink:#ffffff; --accent-soft:#eaf0fd; --focus:#2f5bd3;
@@ -157,6 +158,8 @@
     /* Infra */
     .infra-grid { display:grid; grid-template-columns:minmax(260px, 340px) minmax(0, 1fr); gap:18px; align-items:start; }
     .req-form textarea { width:100%; min-height:96px; padding:10px; resize:vertical; }
+    .req-form input { width:100%; padding:8px 10px; margin:4px 0 2px; font:13px var(--mono); }
+    .req-form label + textarea, .req-form label + input { margin-top:4px; }
     .req-list { display:flex; flex-direction:column; gap:8px; margin-top:14px; }
     .req { text-align:left; width:100%; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 12px; color:var(--ink); }
     .req:hover { border-color:var(--accent); }
@@ -181,6 +184,27 @@
     .file summary { cursor:pointer; font:13px var(--mono); }
     .question { border-left:3px solid var(--warn); }
     textarea.reason { width:100%; min-height:64px; padding:8px; margin-top:8px; font-size:13.5px; }
+
+    /* Findings list */
+    .filters { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px; }
+    .filters input[type=search] { flex:1 1 220px; min-width:0; padding:7px 10px; }
+    .filters select { padding:6px 8px; max-width:100%; }
+    .sevs { display:flex; gap:4px; flex-wrap:wrap; }
+    .sevs button { padding:4px 9px; font-size:12px; border-radius:999px; background:var(--panel-2); color:var(--ink-2); border:1px solid var(--line); text-transform:capitalize; }
+    .sevs button[aria-pressed=true] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+    .frow { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:4px 12px; align-items:start; padding:12px 14px; border-bottom:1px solid var(--line); }
+    .frow:last-child { border-bottom:0; }
+    .frow .t { font-weight:600; overflow-wrap:anywhere; }
+    .frow .fixcell { display:flex; flex-direction:column; align-items:flex-end; gap:6px; text-align:right; }
+    .flist { padding:0; overflow:hidden; }
+    .pager { display:flex; gap:8px; align-items:center; justify-content:center; margin:14px 0; }
+    .fixline { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:13px; }
+    .fixline a { font-weight:600; }
+    .see-all { display:inline-block; margin-top:8px; font-weight:600; }
+    @media (max-width: 860px) {
+      .frow { grid-template-columns:auto minmax(0,1fr); }
+      .frow .fixcell { grid-column:1 / -1; align-items:flex-start; text-align:left; }
+    }
 
     /* Dialog */
     dialog { border:1px solid var(--line); border-radius:14px; background:var(--panel); color:var(--ink); padding:18px 22px; box-shadow:0 10px 40px rgba(0,0,0,.25); max-width:420px; width:calc(100% - 32px); }
@@ -210,10 +234,11 @@
       <div class="brand"><div class="logo" aria-hidden="true">A</div><div><div class="brand-name">DevOps Audit</div><div class="brand-sub">Security assistant</div></div></div>
       <nav>
         <a href="#brief" data-view="brief"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h10"/></svg>Brief<span class="kbd">g b</span></a>
+        <a href="#findings" data-view="findings"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>Findings<span class="kbd">g f</span></a>
         <a href="#chat" data-view="chat"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12z"/></svg>Chat<span class="kbd">g c</span></a>
-        <a href="#infra" data-view="infra"><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Infra requests<span class="kbd">g i</span></a>
+        <a href="#infra" data-view="infra" data-admin hidden><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Infra requests<span class="kbd">g i</span></a>
         <a href="#review" data-view="review"><svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>Review<span class="badge" id="review-count" hidden></span></a>
-        <a href="#conventions" data-view="conventions"><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M9 10h6M9 14h6M9 18h4"/></svg>Conventions<span class="kbd">g n</span></a>
+        <a href="#conventions" data-view="conventions" data-admin hidden><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M9 10h6M9 14h6M9 18h4"/></svg>Conventions<span class="kbd">g n</span></a>
       </nav>
       <div class="side-foot">
         <select id="persona" hidden aria-label="Sign in as"></select>
@@ -237,6 +262,25 @@
           <div id="brief"><div class="muted">Loading…</div></div>
         </section>
 
+        <section class="view" id="view-findings" data-title="Findings" hidden>
+          <div class="view-head"><div><h1>Findings</h1><div class="sub" id="findings-sub">Everything open for your teams, most severe first, with where each fix stands.</div></div></div>
+          <form class="card filters" id="findings-filters" role="search">
+            <input id="f-q" type="search" placeholder="Search title, repo or rule" aria-label="Search findings" maxlength="100">
+            <div class="sevs" id="f-sev" role="group" aria-label="Severity"></div>
+            <select id="f-source" aria-label="Source"><option value="">All sources</option></select>
+            <select id="f-team" aria-label="Team" hidden></select>
+            <select id="f-fix" aria-label="Fix status">
+              <option value="">Any fix status</option><option value="none">No fix yet</option>
+              <option value="in_progress">Fix waiting / in progress</option><option value="opened">PR opened</option>
+            </select>
+            <select id="f-status" aria-label="Finding status">
+              <option value="open">Open</option><option value="fixed">Fixed</option><option value="suppressed">Suppressed</option><option value="any">Any status</option>
+            </select>
+          </form>
+          <div id="findings"><div class="muted">Loading…</div></div>
+          <div class="pager" id="findings-pager"></div>
+        </section>
+
         <section class="view chat-view" id="view-chat" data-title="Chat" hidden>
           <div id="log">
             <div class="empty" id="chat-empty"><div class="big">Ask about your team's findings</div>
@@ -248,13 +292,16 @@
         </section>
 
         <section class="view" id="view-infra" data-title="Infra requests" hidden>
-          <div class="view-head"><div><h1>Infra requests</h1><div class="sub">Describe what you need; the drafter checks conventions, past requests, the infra repo and AWS, then drafts Terraform for a lead to approve.</div></div></div>
+          <div class="view-head"><div><h1>Infra requests</h1><div class="sub">Security admins only. Pick a repo and describe what you need; the drafter checks conventions, past requests, that repo and AWS, then drafts Terraform for you to approve. Approving opens a PR, reviewed again in GitHub.</div></div></div>
           <div class="infra-grid">
             <div>
               <form class="card req-form" id="infra-form">
                 <label class="muted" for="infra-text">New request</label>
                 <textarea id="infra-text" maxlength="2000" placeholder="e.g. A private S3 bucket for nightly analytics exports, 30-day expiry, readable by the ETL role"></textarea>
-                <div class="actions"><select id="infra-team" hidden aria-label="Team"></select><button class="primary" id="infra-submit">Draft Terraform</button><span class="muted" id="infra-status"></span></div>
+                <label class="muted" for="infra-repo">Repository</label>
+                <input id="infra-repo" list="infra-repos" maxlength="100" autocomplete="off" spellcheck="false" placeholder="demo-infra-terraform">
+                <datalist id="infra-repos"></datalist>
+                <div class="actions"><button class="primary" id="infra-submit">Draft Terraform</button><span class="muted" id="infra-status"></span></div>
               </form>
               <div class="req-list" id="infra-list"></div>
             </div>
@@ -268,7 +315,7 @@
         </section>
 
         <section class="view" id="view-conventions" data-title="Conventions" hidden>
-          <div class="view-head"><div><h1>Conventions</h1><div class="sub">The Terraform drafter's long-term memory. Anyone proposes; a lead approves before the drafter uses it.</div></div></div>
+          <div class="view-head"><div><h1>Conventions</h1><div class="sub">The Terraform drafter's long-term memory. Rejection reasons arrive here as proposals; an admin approves them before the drafter uses them.</div></div></div>
           <div id="conventions"><div class="muted">Loading…</div></div>
         </section>
       </main>
@@ -280,6 +327,7 @@
     <div class="keys">
       <kbd>/</kbd><span>Ask a question</span>
       <kbd>g b</kbd><span>Brief</span>
+      <kbd>g f</kbd><span>Findings</span>
       <kbd>g c</kbd><span>Chat</span>
       <kbd>g i</kbd><span>Infra requests</span>
       <kbd>g r</kbd><span>Review</span>

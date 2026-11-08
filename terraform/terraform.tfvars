@@ -1,7 +1,7 @@
 # Demo stack in the personal AWS account (Sydney), with personal GitHub repos and Entra tenant.
 # Terraform loads this file automatically; the deploy-demo workflow uses it unless the
 # DEMO_TFVARS secret is set. No secrets here: keys live in Secrets Manager.
-# Steps: local/DEPLOY-DEMO.md. Expected cost: ~$25-40/month; destroy after the demo.
+# Steps: local/DEPLOY-DEMO.md. Expected cost: ~$40-55/month; destroy after the demo.
 
 aws_region  = "ap-southeast-2"
 name_prefix = "audit-demo"
@@ -11,13 +11,17 @@ create_vpc        = true
 nat_mode          = "instance"
 nat_instance_type = "t4g.micro" # Free plan: only free-tier-eligible instance types
 
-# Models: Bedrock directly (no LiteLLM gateway in this account). Claude is not enabled on
-# this account, so Amazon Nova Pro (APAC inference profile) for both.
-llm_backend       = "bedrock"
-chat_model        = "apac.amazon.nova-pro-v1:0"
-batch_model       = "apac.amazon.nova-pro-v1:0"
-chat_temperature  = "none"
-batch_temperature = "none"
+# Models: every call goes through LiteLLM on Fargate (litellm.tf) with Bedrock Guardrails.
+# Terraform generates the master key and DB password; a bootstrap Lambda creates the virtual
+# keys through LiteLLM's API and stores them in Secrets Manager. Nothing to do by hand.
+# chat_model / batch_model are the Bedrock ids behind LiteLLM's audit-chat / audit-batch.
+# Claude is not enabled on this account, so Amazon Nova Pro (APAC inference profile) for both.
+litellm_enabled        = true
+litellm_key_budget_usd = 10 # per key (each team, the fix agent, the drafter, default) per 30 days
+chat_model             = "apac.amazon.nova-pro-v1:0"
+batch_model            = "apac.amazon.nova-pro-v1:0"
+chat_temperature       = "none"
+batch_temperature      = "none"
 
 # Small and disposable.
 db_instance_class        = "db.t3.micro"
@@ -90,12 +94,13 @@ enable_config_recorder  = false
 enable_securityhub      = false # then add "securityhub" to collectors
 demo_aws_resources      = true  # /demo/storefront log group (team web) + an unversioned bucket (team data)
 
-# Terraform drafter (Infra requests page). Opens PRs on infra_repo with the fix-bot App, so
-# that App must be installed on demo-infra-terraform with Contents + Pull requests: write.
+# Terraform drafter (Infra requests page): security admins only, for any repo they pick
+# (infra_repo is the default). PRs are opened by the fix-bot App, so it must be installed on
+# every repo you want drafts for, with Contents + Pull requests: write.
 # Without aws_config_tool_enabled it still drafts, it just can't look up existing resources.
 infra_drafter_enabled = true
 infra_repo            = "demo-infra-terraform"
 
 # Spend guard.
 alarm_email        = "rameshbalaji256001@gmail.com"
-monthly_budget_usd = 30
+monthly_budget_usd = 50 # LiteLLM's Fargate task adds ~$15-20

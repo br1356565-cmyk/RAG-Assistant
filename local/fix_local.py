@@ -114,7 +114,7 @@ def build_infra(db, github, llm, model, writer, saver, aws=None):
     repo = os.environ.get("INFRA_REPO", "demo-infra-terraform")
     tool_deps = SimpleNamespace(gateway=None, aws=aws, ssm=None, fix_client=None)
     deps = InfraDeps(db=db, tools=lambda: tools_for("infra", tool_deps), llm_for=lambda teams: llm, model=model,
-                     read_infra=lambda scope, path: github.read_file(repo, path),
-                     open_pr=lambda scope, rid: open_infra_pr(db, scope, rid, writer=writer, repo=repo),
+                     read_infra=lambda scope, target, path: github.read_file(target, path),
+                     open_pr=lambda scope, rid: open_infra_pr(db, scope, rid, writer=writer),
                      repo=repo, github=github, aws=aws)
     return InfraService(deps, saver)

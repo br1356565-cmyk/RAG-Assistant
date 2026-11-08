@@ -264,7 +264,7 @@ locals {
     { actions = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"], resources = ["*"] },
     { actions = ["s3:GetObject"], resources = ["${aws_s3_bucket.data.arn}/agentcore/*"] },
     { actions = ["rds-db:connect"], resources = ["${local.db_user_arn}/${local.app_db_user}"] },
-    { actions = ["bedrock:InvokeModel"], resources = var.llm_backend == "bedrock" ? [
+    { actions = ["bedrock:InvokeModel"], resources = local.llm_backend == "bedrock" ? [
       "arn:${local.partition}:bedrock:*::foundation-model/*",
       "arn:${local.partition}:bedrock:*:${local.account_id}:inference-profile/*",
     ] : [] },
@@ -418,17 +418,18 @@ resource "aws_bedrockagentcore_agent_runtime" "fix" {
     OTEL_SERVICE_NAME   = "${local.name}-fix-agent"
     DB_USER             = local.app_db_user
     AUDIT_AWS_REGION    = var.aws_region
-    LLM_BACKEND         = var.llm_backend
-    GATEWAY_URL         = coalesce(var.gateway_url, "unused")
+    LLM_BACKEND         = local.llm_backend
+    GATEWAY_URL         = coalesce(local.llm_gateway_url, "unused")
     GATEWAY_KEYS_SECRET = aws_secretsmanager_secret.gateway_keys.arn
-    BATCH_MODEL         = var.batch_model
+    CHAT_MODEL          = local.chat_model_name
+    BATCH_MODEL         = local.batch_model_name
     GATEWAY_MCP_URL     = aws_bedrockagentcore_gateway.tools[0].gateway_url
     GATEWAY_TOOLS       = jsonencode(local.gateway_tools)
     SCOPE_KEY_SECRET    = aws_secretsmanager_secret.scope_key[0].arn
     }, { for k, v in {
       INFRA_DRAFTER = local.infra_drafter ? "true" : null
       INFRA_REPO    = local.infra_drafter ? var.infra_repo : null
-      INFRA_MODEL   = local.infra_drafter ? coalesce(var.infra_model, var.chat_model) : null
+      INFRA_MODEL   = local.infra_drafter ? coalesce(var.infra_model, local.chat_model_name) : null
   } : k => v if v != null })
 
   depends_on = [aws_iam_role_policy.runtime]

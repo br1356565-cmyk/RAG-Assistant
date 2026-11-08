@@ -1,11 +1,12 @@
-"""The drafter's one write: open a pull request in the infra repo for an APPROVED request.
+"""The drafter's one write: open a pull request in the request's repo for an APPROVED request.
 
 Checked here, whatever any model or caller says:
-  1. the request is visible in the caller's scope (row-level security);
-  2. a lead approved it (status 'approved', approver recorded);
+  1. the request is visible in the caller's scope (row-level security: admins only);
+  2. an admin approved it (status 'approved', approver recorded);
   3. the files being written are exactly the files that were approved (SHA-256 of their
      canonical JSON, stored at approval);
-  4. every path is under teams/<team>/ and no PR was opened before.
+  4. paths are safe relative .tf/.tfvars/.md paths and no PR was opened before.
+The repo comes from the request row, never from the caller.
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ import logging
 import os
 
 from audit_agent.db import Database, Scope
+from audit_agent.tools.infra import ALLOWED_SUFFIXES, _safe_path
 
 from .github_write import WriteRefused, _check_writer_config, _default_writer
 
@@ -27,12 +29,12 @@ def files_hash(files: list[dict]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def open_infra_pr(db: Database, scope: Scope, request_id: str, writer=None, repo: str | None = None) -> dict:
-    repo = repo or os.environ.get("INFRA_REPO", "demo-infra-terraform")
+def open_infra_pr(db: Database, scope: Scope, request_id: str, writer=None) -> dict:
     with db.scoped(scope) as conn:
         row = conn.execute("select * from infra_requests where id = %s", (request_id,)).fetchone()
     if not row:
         raise WriteRefused("infra request not found in scope")
+    repo = row["repo"] or os.environ.get("INFRA_REPO", "demo-infra-terraform")
     if row["pr_url"]:
         return {"pr_url": row["pr_url"], "status": "opened"}
     if row["status"] != "approved" or not row["approver"]:
@@ -42,19 +44,23 @@ def open_infra_pr(db: Database, scope: Scope, request_id: str, writer=None, repo
         raise WriteRefused("nothing to write: the approved draft has no files")
     if files_hash(files) != row["approved_sha256"]:
         raise WriteRefused("files changed after approval")
-    base_dir = f"teams/{row['team_id']}/"
-    if any(not f["path"].startswith(base_dir) or ".." in f["path"].split("/") for f in files):
-        raise WriteRefused(f"files must be under {base_dir}")
+    for f in files:
+        try:
+            ok = _safe_path(f["path"]) == f["path"] and f["path"].endswith(ALLOWED_SUFFIXES)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise WriteRefused(f"refusing path {f['path']!r}")
 
     if writer is None:
         _check_writer_config()
     w = writer or _default_writer()
     base = w.default_branch(repo)
-    branch = f"infra/{row['team_id']}-{request_id[:8]}"
+    branch = f"infra/{request_id[:8]}"
     try:
         w.create_branch(repo, branch, w.branch_sha(repo, base))
         for f in files:
-            w.put_file(repo, f["path"], f["content"], branch, f"{row['team_id']}: {f['path'].rsplit('/', 1)[-1]}",
+            w.put_file(repo, f["path"], f["content"], branch, f"infra: {f['path'].rsplit('/', 1)[-1]}",
                        w.file_sha(repo, f["path"], base))
         failing = [c["name"] for c in (row["checks"] or []) if not c.get("ok")]
         body = (f"**Request** ({row['requested_by']}): {row['request']}\n\n"
@@ -63,7 +69,7 @@ def open_infra_pr(db: Database, scope: Scope, request_id: str, writer=None, repo
                 + ("all passed" if not failing else "warnings: " + "; ".join(failing)) +
                 f"\n\nDrafted by the DevOps audit Terraform drafter; approved by {row['approver']}. "
                 "CI must pass fmt/validate/plan before merging.")
-        title = f"infra({row['team_id']}): {row['request'][:60]}"
+        title = f"infra: {row['request'][:60]}"
         url = w.open_pull(repo, branch, base, title, body)
     except Exception as exc:
         with db.scoped(scope) as conn:

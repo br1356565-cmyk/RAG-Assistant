@@ -69,7 +69,7 @@ variable "private_route_table_ids" {
 variable "llm_backend" {
   type        = string
   default     = "gateway"
-  description = "\"gateway\": the LiteLLM gateway (chat_model/batch_model are its aliases). \"bedrock\": Bedrock Converse directly (they are Bedrock model or inference-profile ids)."
+  description = "Ignored when litellm_enabled = true (everything goes through the stack's LiteLLM). Otherwise \"gateway\": an existing LiteLLM at gateway_url (chat_model/batch_model are its aliases); \"bedrock\": Bedrock Converse directly."
   validation {
     condition     = contains(["gateway", "bedrock"], var.llm_backend)
     error_message = "llm_backend is \"gateway\" or \"bedrock\"."
@@ -95,13 +95,15 @@ variable "gateway_port" {
 }
 
 variable "chat_model" {
-  type    = string
-  default = "audit-chat"
+  type        = string
+  default     = "audit-chat"
+  description = "With litellm_enabled: the Bedrock model or inference-profile id behind LiteLLM's audit-chat alias. Otherwise the model name the backend expects."
 }
 
 variable "batch_model" {
-  type    = string
-  default = "audit-batch"
+  type        = string
+  default     = "audit-batch"
+  description = "With litellm_enabled: the Bedrock model or inference-profile id behind LiteLLM's audit-batch alias."
 }
 
 variable "chat_temperature" {
@@ -531,17 +533,67 @@ variable "demo_aws_resources" {
 variable "infra_drafter_enabled" {
   type        = bool
   default     = false
-  description = "Team members describe infrastructure in the web app; the fix runtime drafts Terraform for a lead to approve and opens a PR on infra_repo. Needs agentcore_enabled and fix_agent_enabled, and the fix-bot GitHub App installed on infra_repo with contents and pull-request write."
+  description = "Security admins describe infrastructure in the web app and pick a repo; the fix runtime drafts Terraform for them to approve and opens a PR on that repo. Needs agentcore_enabled and fix_agent_enabled, and the fix-bot GitHub App installed on the target repos with contents and pull-request write."
 }
 
 variable "infra_repo" {
   type        = string
   default     = "demo-infra-terraform"
-  description = "The shared Terraform repo (in github_org) the drafter reads and opens PRs on. Drafts only ever touch teams/<team>/."
+  description = "The repo (in github_org) the drafter suggests by default. Admins can pick any repo the fix-bot App is installed on."
 }
 
 variable "infra_model" {
   type        = string
   default     = null
   description = "Model for the drafter; null = chat_model."
+}
+
+# ── LiteLLM in this stack (litellm.tf) ───────────────────────────────────────────────────
+variable "litellm_enabled" {
+  type        = bool
+  default     = false
+  description = "Run LiteLLM on ECS Fargate (private, no load balancer) with Bedrock Guardrails; every model call goes through it, keys are generated into Secrets Manager. Costs roughly USD 15-20/month for one task."
+}
+
+variable "litellm_image" {
+  type        = string
+  default     = "ghcr.io/berriai/litellm:v1.90.2"
+  description = "Pin a version tag, never latest."
+}
+
+variable "litellm_cpu" {
+  type    = number
+  default = 512
+}
+
+variable "litellm_memory" {
+  type    = number
+  default = 1024
+}
+
+variable "litellm_cpu_architecture" {
+  type        = string
+  default     = "ARM64"
+  description = "ARM64 is cheaper; use X86_64 if the pinned image has no arm64 build."
+  validation {
+    condition     = contains(["ARM64", "X86_64"], var.litellm_cpu_architecture)
+    error_message = "ARM64 or X86_64."
+  }
+}
+
+variable "litellm_secret_version" {
+  type        = number
+  default     = 1
+  description = "Bump to regenerate the LiteLLM master key and database password (the bootstrap then re-checks every virtual key). Changing it also rotates the salt key: stored provider credentials would need re-entry (this stack stores none)."
+}
+
+variable "litellm_key_budget_usd" {
+  type        = number
+  default     = 10
+  description = "Monthly spend cap per virtual key (each team, the fix agent, the drafter, default)."
+}
+
+variable "litellm_key_rpm" {
+  type    = number
+  default = 60
 }

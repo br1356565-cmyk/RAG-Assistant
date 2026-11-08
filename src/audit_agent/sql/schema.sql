@@ -189,6 +189,8 @@ create table if not exists fix_requests (
 alter table fix_requests add column if not exists package text;
 alter table fix_requests add column if not exists covers text[] not null default '{}';
 alter table fix_requests add column if not exists major_upgrade boolean not null default false;
+create index if not exists fix_requests_fp on fix_requests (fingerprint, created_at desc);
+create index if not exists fix_requests_covers on fix_requests using gin (covers);
 
 -- Team knowledge: accepted risks, false positives, context. Agent may only PROPOSE.
 create table if not exists team_notes (
@@ -341,7 +343,9 @@ create policy fixes_update on fix_requests for update to audit_app
   with check (
     (app_is_admin() or team_id = any (app_team_ids()))
     and (status not in ('approved','rejected') or approver = app_user_id())
-    and (status not in ('approved','rejected') or app_is_admin() or app_role() = 'team_lead'));
+    and (status not in ('approved','rejected') or app_is_admin() or app_role() = 'team_lead')
+    -- four eyes: nobody approves their own request, admins included
+    and (status <> 'approved' or approver is distinct from requested_by));
 
 drop policy if exists jobs_own on chat_jobs;
 create policy jobs_own on chat_jobs for all to audit_app
@@ -427,37 +431,36 @@ create table if not exists infra_requests (
                     coalesce(request, '') || ' ' || coalesce(reasoning, '') || ' ' || coalesce(reject_reason, ''))) stored
 );
 create index if not exists infra_requests_search on infra_requests using gin (search);
+-- v3: drafts are requested by security admins for any repo they choose (not per team).
+alter table infra_requests add column if not exists repo text;
+alter table infra_requests alter column team_id drop not null;
 create index if not exists infra_requests_team on infra_requests (team_id, created_at desc);
 
 alter table infra_conventions enable row level security; alter table infra_conventions force row level security;
 alter table infra_requests    enable row level security; alter table infra_requests    force row level security;
 
+-- The Terraform drafter is a security-admin tool: only admins see, request, answer and decide.
+-- An admin may approve their own draft (the GitHub PR review is the second pair of eyes); the
+-- approval is still bound to the exact files they reviewed.
 drop policy if exists conventions_read on infra_conventions;
-create policy conventions_read on infra_conventions for select to audit_app using (
-  app_is_admin() or team_id is null or team_id = any (app_team_ids()));
+create policy conventions_read on infra_conventions for select to audit_app using (app_is_admin());
 drop policy if exists conventions_propose on infra_conventions;
 create policy conventions_propose on infra_conventions for insert to audit_app with check (
-  status = 'proposed' and approver is null and author = app_user_id()
-  and (app_is_admin() or team_id = any (app_team_ids())));
+  status = 'proposed' and approver is null and author = app_user_id() and app_is_admin());
 drop policy if exists conventions_decide on infra_conventions;
 create policy conventions_decide on infra_conventions for update to audit_app
-  using (app_is_admin() or (app_role() = 'team_lead' and team_id = any (app_team_ids())))
-  with check (approver = app_user_id() and status in ('active','rejected')
-              and (app_is_admin() or (app_role() = 'team_lead' and team_id = any (app_team_ids()))));
+  using (app_is_admin())
+  with check (approver = app_user_id() and status in ('active','rejected') and app_is_admin());
 
 drop policy if exists infra_read on infra_requests;
-create policy infra_read on infra_requests for select to audit_app using (
-  app_is_admin() or team_id = any (app_team_ids()));
+create policy infra_read on infra_requests for select to audit_app using (app_is_admin());
 drop policy if exists infra_create on infra_requests;
 create policy infra_create on infra_requests for insert to audit_app with check (
-  team_id = any (app_team_ids()) and status = 'drafting' and approver is null and requested_by = app_user_id());
+  app_is_admin() and status = 'drafting' and approver is null and requested_by = app_user_id());
 drop policy if exists infra_update on infra_requests;
 create policy infra_update on infra_requests for update to audit_app
-  using (app_is_admin() or team_id = any (app_team_ids()))
-  with check (
-    (app_is_admin() or team_id = any (app_team_ids()))
-    and (status not in ('approved','rejected') or approver = app_user_id())
-    and (status not in ('approved','rejected') or app_is_admin() or app_role() = 'team_lead'));
+  using (app_is_admin())
+  with check (app_is_admin() and (status not in ('approved','rejected') or approver = app_user_id()));
 
 do $$
 declare t text;
@@ -472,3 +475,74 @@ grant select, insert on infra_conventions to audit_app;
 grant update (status, approver, decided_at) on infra_conventions to audit_app;
 grant select, insert, update on infra_requests to audit_app;
 grant select, insert, update, delete on infra_conventions, infra_requests to audit_ingest;
+
+-- ── Draft integrity ────────────────────────────────────────────────────────
+-- RLS says WHICH rows a person may update; it can't say which columns or transitions. A
+-- member's scope may update their team's rows (the answer to a drafter question, a failed
+-- job), so without this a member could rewrite a draft's content after the lead looked at
+-- it, or mark a request "opened" with any link. Only the fix/drafter workers (role 'worker')
+-- write draft content and PR results; people only move status along these edges:
+--   awaiting_approval -> approved | rejected   (leads; RLS checks who)
+--   needs_input -> drafting                    (the answer to the drafter's question)
+--   drafting | needs_input -> failed           (a background job that died)
+-- The ingest role (maintenance) and the table owner are not restricted.
+create or replace function guard_draft_update() returns trigger language plpgsql as $$
+declare
+  edge text := old.status || '>' || new.status;
+  people_edges text[] := array['awaiting_approval>approved','awaiting_approval>rejected',
+                               'needs_input>drafting','drafting>failed','needs_input>failed'];
+  old_doc jsonb;
+  new_doc jsonb;
+  locked text[];
+begin
+  if app_role() = 'worker' or app_user_id() like 'worker:%' or pg_has_role(current_user, 'audit_ingest', 'MEMBER')
+     or not pg_has_role(current_user, 'audit_app', 'MEMBER') then
+    return new;
+  end if;
+  if old.status <> new.status and not edge = any (people_edges) then
+    raise exception 'status % -> % is not a change a person can make', old.status, new.status
+      using errcode = 'insufficient_privilege';
+  end if;
+  -- everything except the columns a person's decision or answer legitimately sets
+  locked := case tg_table_name
+    when 'fix_requests' then array['status','approver','decided_at','updated_at','approved_sha256']
+    else array['status','approver','decided_at','updated_at','approved_sha256','reject_reason',
+               'answer','question','error','search'] end;
+  old_doc := to_jsonb(old) - locked;
+  new_doc := to_jsonb(new) - locked;
+  if old_doc is distinct from new_doc then
+    raise exception 'draft content is written only by the agent' using errcode = 'insufficient_privilege';
+  end if;
+  if new.approved_sha256 is distinct from old.approved_sha256 and new.status <> 'approved' then
+    raise exception 'the approval hash is set only by an approval' using errcode = 'insufficient_privilege';
+  end if;
+  if tg_table_name = 'infra_requests' then
+    if (new.answer is distinct from old.answer or new.question is distinct from old.question)
+       and edge <> 'needs_input>drafting' then
+      raise exception 'answers are accepted only while the drafter is waiting for one'
+        using errcode = 'insufficient_privilege';
+    end if;
+    if new.reject_reason is distinct from old.reject_reason and new.status <> 'rejected' then
+      raise exception 'a reject reason goes with a rejection' using errcode = 'insufficient_privilege';
+    end if;
+  end if;
+  if new.error is distinct from old.error and new.status <> 'failed' then
+    raise exception 'errors are recorded only with a failure' using errcode = 'insufficient_privilege';
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists fix_requests_guard on fix_requests;
+create trigger fix_requests_guard before update on fix_requests
+  for each row execute function guard_draft_update();
+drop trigger if exists infra_requests_guard on infra_requests;
+create trigger infra_requests_guard before update on infra_requests
+  for each row execute function guard_draft_update();
+
+-- Step Functions task tokens: only the people who can release a gate (leads, admins) see them.
+alter table review_gates enable row level security; alter table review_gates force row level security;
+drop policy if exists gates_deciders on review_gates;
+create policy gates_deciders on review_gates for all to audit_app
+  using (app_role() in ('team_lead','security_admin')) with check (app_role() in ('team_lead','security_admin'));
+drop policy if exists ingest_all on review_gates;
+create policy ingest_all on review_gates for all to audit_ingest using (true) with check (true);

@@ -1,7 +1,10 @@
 """Schema migration Lambda. Terraform invokes it on every apply where the schema changed.
 
 Connects as the RDS master user (credentials from the RDS-managed secret), applies the
-idempotent schema, and creates the IAM-authenticated login users.
+idempotent schema, and creates the IAM-authenticated login users. With LiteLLM on, it also
+creates LiteLLM's own database and password login (the password Terraform generated into the
+LiteLLM secret), separate from the audit schema: LiteLLM's tables never share a database
+with the findings.
 """
 from __future__ import annotations
 
@@ -42,9 +45,23 @@ def apply(conn: psycopg.Connection, use_iam: bool = True) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def _master_secret(region: str, deadline: float, client=None, sleep=time.sleep) -> dict:
+def ensure_litellm_db(conn: psycopg.Connection, user: str, password: str, dbname: str) -> None:
+    """Idempotent: the login exists with this password, and owns its own database."""
+    exists = conn.execute("select 1 from pg_roles where rolname = %s", (user,)).fetchone()
+    verb = "alter" if exists else "create"
+    conn.execute(sql.SQL(verb + " role {} with login password {}").format(sql.Identifier(user), sql.Literal(password)))
+    # PostgreSQL 16+: to create a database owned by a role, the creator must be able to SET ROLE to it.
+    conn.execute(sql.SQL("grant {} to current_user").format(sql.Identifier(user)))
+    if not conn.execute("select 1 from pg_database where datname = %s", (dbname,)).fetchone():
+        conn.execute(sql.SQL("create database {} owner {}").format(sql.Identifier(dbname), sql.Identifier(user)))
+    conn.execute(sql.SQL("revoke all on database {} from public").format(sql.Identifier(dbname)))
+
+
+def _master_secret(region: str, deadline: float, client=None, sleep=time.sleep,
+                   secret_id: str | None = None) -> dict:
     """Secrets Manager is reached through the NAT. On a first apply in a fresh VPC the NAT
     instance may still be booting, so retry with short timeouts instead of hanging."""
+    secret_id = secret_id or os.environ["DB_MASTER_SECRET_ARN"]
     if client is None:
         import boto3
         from botocore.config import Config
@@ -53,7 +70,7 @@ def _master_secret(region: str, deadline: float, client=None, sleep=time.sleep) 
             connect_timeout=5, read_timeout=10, retries={"max_attempts": 1}))
     while True:
         try:
-            return json.loads(client.get_secret_value(SecretId=os.environ["DB_MASTER_SECRET_ARN"])["SecretString"])
+            return json.loads(client.get_secret_value(SecretId=secret_id)["SecretString"])
         except Exception as exc:  # noqa: BLE001 - connection errors until the NAT is up
             if time.monotonic() > deadline:
                 raise
@@ -73,5 +90,9 @@ def handler(event: dict, context) -> dict:
         conn.row_factory = dict_row
         from fix_agent.checkpoints import setup as setup_checkpoints
         setup_checkpoints(conn)               # LangGraph tables for paused fix graphs
+        if os.environ.get("LITELLM_SECRET_ARN"):
+            llm = _master_secret(region, time.monotonic() + 60, secret_id=os.environ["LITELLM_SECRET_ARN"])
+            ensure_litellm_db(conn, llm["db_user"], llm["db_password"], llm["db_name"])
+            log.info(json.dumps({"event": "migrate_litellm_db", "db": llm["db_name"]}))
     log.info(json.dumps({"event": "migrate", "schema_sha256": digest}))
     return {"status": "ok", "schema_sha256": digest}

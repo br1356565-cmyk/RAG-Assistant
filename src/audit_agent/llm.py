@@ -94,6 +94,10 @@ class GatewayKeys:
             raise ValueError("gateway keys secret needs a 'default' entry")
         self._keys = keys
 
+    def named(self, name: str) -> str:
+        """A component's own key (e.g. "fix", "infra"), else the default."""
+        return self._keys.get(name) or self._keys["default"]
+
     def for_teams(self, team_ids: tuple[str, ...]) -> str:
         for t in sorted(team_ids):
             if t in self._keys:

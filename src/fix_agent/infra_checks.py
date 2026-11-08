@@ -35,14 +35,9 @@ def _blocks(doc: dict, kind: str):
                 yield _unq(typ), "", named if isinstance(named, dict) else {}
 
 
-def run(files: list[dict], team: str) -> list[dict]:
+def run(files: list[dict]) -> list[dict]:
     checks: list[dict] = []
-    base = f"teams/{team}/"
     tf = [f for f in files if f["path"].endswith((".tf", ".tfvars"))]
-
-    outside = [f["path"] for f in files if not f["path"].startswith(base)]
-    checks.append({"name": f"Files only under {base}", "ok": not outside,
-                   "detail": ", ".join(outside) if outside else f"{len(files)} file(s)"})
 
     parsed, errors = {}, []
     for f in tf:
@@ -59,7 +54,7 @@ def run(files: list[dict], team: str) -> list[dict]:
             if typ.startswith(TAGGABLE_PREFIXES) and typ not in UNTAGGABLE:
                 tags = body.get("tags")
                 tags = tags[0] if isinstance(tags, list) and tags else tags
-                if not isinstance(tags, dict) or _unq(tags.get("team")) != team:
+                if not isinstance(tags, dict) or not str(_unq(tags.get("team")) or "").strip():
                     untagged.append(f"{typ}.{name}")
         for typ, _n, _body in _blocks(doc, "provider"):
             roots.append(f"{path}: provider {typ}")
@@ -68,10 +63,10 @@ def run(files: list[dict], team: str) -> list[dict]:
             if isinstance(body, dict) and "backend" in body:
                 kinds = [_unq(k) for b in body["backend"] if isinstance(b, dict) for k in b if k != "__is_block__"]
                 roots.append(f"{path}: backend {', '.join(kinds)}".strip())
-    checks.append({"name": f'Resources tagged team = "{team}"', "ok": not untagged,
+    checks.append({"name": 'Resources have a "team" tag', "ok": not untagged,
                    "detail": ("missing on " + ", ".join(untagged[:8])) if untagged else "all tagged"})
-    checks.append({"name": "No provider/backend in the team folder", "ok": not roots,
-                   "detail": "; ".join(roots[:4]) if roots else "uses the repo's root configuration"})
+    checks.append({"name": "No provider/backend blocks", "ok": not roots,
+                   "detail": "; ".join(roots[:4]) if roots else "uses the repo's existing configuration"})
 
     text = "\n".join(f["content"] for f in tf)
     for name, rx in (("No hard-coded secrets", SECRET_RE), ('No "*" IAM actions', WILDCARD_RE),

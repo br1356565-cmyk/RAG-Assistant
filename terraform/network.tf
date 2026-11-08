@@ -15,8 +15,8 @@ resource "aws_security_group" "lambda" {
       error_message = "Set create_vpc = true, or give vpc_id and at least two private_subnet_ids (RDS needs two AZs)."
     }
     precondition {
-      condition     = var.llm_backend != "gateway" || var.gateway_url != null
-      error_message = "llm_backend = \"gateway\" needs gateway_url."
+      condition     = local.llm_backend != "gateway" || local.llm_gateway_url != null
+      error_message = "llm_backend = \"gateway\" needs gateway_url (or litellm_enabled = true)."
     }
   }
 }

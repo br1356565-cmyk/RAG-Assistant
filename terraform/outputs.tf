@@ -27,11 +27,22 @@ output "lambda_security_group_id" {
 output "secrets_to_populate" {
   description = "Set these once with: aws secretsmanager put-secret-value --secret-id <arn> --secret-string file://<file>"
   value = {
-    gateway_keys       = "${aws_secretsmanager_secret.gateway_keys.arn}  JSON: {\"default\": \"sk-...\", \"<team_id>\": \"sk-...\"}"
+    gateway_keys       = local.litellm ? "filled automatically by the LiteLLM key bootstrap" : "${aws_secretsmanager_secret.gateway_keys.arn}  JSON: {\"default\": \"sk-...\", \"<team_id>\": \"sk-...\"}"
     github_private_key = "${aws_secretsmanager_secret.github_private_key.arn}  PEM file of the GitHub App"
     slack_webhook      = "${aws_secretsmanager_secret.slack_webhook.arn}  https://hooks.slack.com/services/..."
     fix_github_key     = local.agentcore && var.fix_agent_enabled ? "${aws_secretsmanager_secret.fix_github_private_key[0].arn}  PEM file of the fix-bot GitHub App (write access)" : "not used"
   }
+}
+
+output "litellm" {
+  description = "The LiteLLM proxy (null when litellm_enabled = false). Keys: the gateway_keys secret."
+  value = local.litellm ? {
+    url          = local.llm_gateway_url
+    log_group    = aws_cloudwatch_log_group.litellm[0].name
+    guardrails   = { pii = aws_bedrock_guardrail.pii[0].guardrail_id, policy = aws_bedrock_guardrail.policy[0].guardrail_id }
+    key_names    = local.llm_key_names
+    keys_created = try(jsondecode(aws_lambda_invocation.llm_keys[0].result), null)
+  } : null
 }
 
 output "collector_role_arn" {

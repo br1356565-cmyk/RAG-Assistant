@@ -93,7 +93,8 @@ def handler(event: dict, context, env=None) -> dict:
         if name not in READ_TOOLS or name not in REGISTRY:
             return {"error": f"unknown tool {name!r}"}
         tool = REGISTRY[name]
-        ctx = ToolContext(scope=scope, db=db, github=github, mode="remote", ssm=ssm, aws=aws)
+        ctx = ToolContext(scope=scope, db=db, github=github, mode="remote", ssm=ssm, aws=aws,
+                          extra={"infra_repo": claims["infra_repo"]} if claims.get("infra_repo") else {})
         result = tool.handler(ctx, tool.args_model.model_validate(args))
         return {"data": result.data, "finding_ids": sorted(result.finding_ids), "sources": sorted(result.sources)}
     except ToolError as exc:

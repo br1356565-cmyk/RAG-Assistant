@@ -22,7 +22,7 @@ class InfraService:
 
     def _row(self, scope: Scope, request_id: str) -> dict:
         with self.deps.db.scoped(scope) as conn:
-            row = conn.execute("select id, team_id, request, status, requested_by from infra_requests where id = %s",
+            row = conn.execute("select id, repo, request, status, requested_by from infra_requests where id = %s",
                                (request_id,)).fetchone()
         if not row:
             raise InfraError("infra request not found in your scope")
@@ -32,7 +32,7 @@ class InfraService:
         row = self._row(scope, request_id)
         if row["status"] != "drafting":
             raise InfraError(f"this request is {row['status']}, not waiting to be drafted")
-        self.graph.invoke({"request_id": request_id, "team_id": row["team_id"], "request": row["request"],
+        self.graph.invoke({"request_id": request_id, "repo": row["repo"] or self.deps.repo, "request": row["request"],
                            "qa": [], "rounds": 0}, self._config(request_id))
         return self.summary(scope, request_id)
 
@@ -40,13 +40,13 @@ class InfraService:
         row = self._row(scope, request_id)
         if row["status"] != "needs_input":
             raise InfraError("this request is not waiting for an answer")
-        if row["requested_by"] != scope.user_id and scope.role not in ("team_lead", "security_admin"):
-            raise InfraError("only the requester (or a lead) can answer")
+        if not scope.is_admin:
+            raise InfraError("only security admins can answer the drafter")
         if "wait_answer" not in (self.graph.get_state(self._config(request_id)).next or ()):
             raise InfraError("this request is not waiting for an answer")
         with self.deps.db.scoped(scope) as conn:
+            # Only the status, the answer and the question; the guard trigger refuses anything else.
             conn.execute("update infra_requests set status = 'drafting', answer = %s, question = null, "
-                         "steps = steps || '[{\"kind\": \"thinking\", \"label\": \"Got your answer; drafting again\"}]'::jsonb, "
                          "updated_at = now() where id = %s", (answer[:2000], request_id))
         self.graph.invoke(Command(resume={"answer": answer}), self._config(request_id))
         return self.summary(scope, request_id)

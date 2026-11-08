@@ -4,6 +4,9 @@ personas:
   - id: growth-engineer
     label: Growth Engineering engineer
     teams: [growth_engineering]
+  - id: uk-engineer
+    label: App Engineering engineer
+    teams: [uk_engineering]
   - id: uk-lead
     label: App Engineering lead
     teams: [uk_engineering]

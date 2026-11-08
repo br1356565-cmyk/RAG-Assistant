@@ -29,7 +29,7 @@ locals {
     aws_secretsmanager_secret.gateway_keys.arn, aws_secretsmanager_secret.github_private_key.arn] },
     # Direct Bedrock backend only. Cross-region inference profiles route to the foundation
     # model in several regions, so the model ARN is allowed in any region.
-    { actions = ["bedrock:InvokeModel"], resources = var.llm_backend == "bedrock" ? [
+    { actions = ["bedrock:InvokeModel"], resources = local.llm_backend == "bedrock" ? [
       "arn:${local.partition}:bedrock:*::foundation-model/*",
       "arn:${local.partition}:bedrock:*:${local.account_id}:inference-profile/*",
     ] : [] },
@@ -41,7 +41,7 @@ locals {
     { actions = ["secretsmanager:GetSecretValue"], resources = local.agentcore ? [aws_secretsmanager_secret.scope_key[0].arn] : [] },
   ]
 
-  fn_statements = tomap({
+  all_fn_statements = tomap({
     chat = concat(local.agent_statements, local.agentcore_lambda_statements, [
       { actions = ["bedrock-agentcore:CreateEvent", "bedrock-agentcore:ListEvents", "bedrock-agentcore:GetEvent",
         "bedrock-agentcore:RetrieveMemoryRecords"],
@@ -86,9 +86,16 @@ locals {
       { actions = ["states:SendTaskSuccess"], resources = ["*"] },
     ]
     migrate = [
-      { actions = ["secretsmanager:GetSecretValue"], resources = [aws_db_instance.db.master_user_secret[0].secret_arn] },
+      { actions = ["secretsmanager:GetSecretValue"], resources = compact([aws_db_instance.db.master_user_secret[0].secret_arn,
+      try(aws_secretsmanager_secret.litellm[0].arn, "")]) },
+    ]
+    llm_keys = [
+      { actions = ["secretsmanager:GetSecretValue"], resources = compact([try(aws_secretsmanager_secret.litellm[0].arn, ""),
+      aws_secretsmanager_secret.gateway_keys.arn]) },
+      { actions = ["secretsmanager:PutSecretValue"], resources = [aws_secretsmanager_secret.gateway_keys.arn] },
     ]
   })
+  fn_statements = { for k, v in local.all_fn_statements : k => v if contains(keys(local.functions), k) }
 }
 
 data "aws_iam_policy_document" "fn" {

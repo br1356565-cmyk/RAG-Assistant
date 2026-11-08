@@ -174,14 +174,18 @@ def test_dev_server_review_and_fix_flow(weekly, tmp_path, monkeypatch):
     try:
         brief = api("GET", "/api/brief", "uk-lead")[1]
         fid = brief["teams"][0]["top"][0]["id"]
-        status, drafted = api("POST", "/api/fixes/request", "uk-lead", {"finding_id": fid})
+        status, drafted = api("POST", "/api/fixes/request", "uk-engineer", {"finding_id": fid})
         assert status == 200 and drafted["status"] == "awaiting_approval", drafted
         assert drafted["manifest"] == "package.json"                      # mapped from package-lock.json
         reviews = api("GET", "/api/reviews", "uk-lead")[1]
         assert reviews["can_decide"] and reviews["fixes"][0]["fix_request_id"] == drafted["fix_request_id"]
         assert api("GET", "/api/reviews", "growth-engineer")[1]["fixes"] == []          # other team's fix
+        sha = reviews["fixes"][0]["content_sha256"]
+        status, out = api("POST", "/api/fixes/decide", "uk-engineer",                      # members can't
+                          {"fix_request_id": drafted["fix_request_id"], "decision": "approved", "content_sha256": sha})
+        assert status == 403
         status, out = api("POST", "/api/fixes/decide", "uk-lead",
-                          {"fix_request_id": drafted["fix_request_id"], "decision": "approved"})
+                          {"fix_request_id": drafted["fix_request_id"], "decision": "approved", "content_sha256": sha})
         assert status == 200 and out["status"] == "opened" and out["pr_url"].startswith("file://")
         written = list(tmp_path.rglob("package.json"))
         assert len(written) == 1 and '"^2.3.4"' in written[0].read_text()

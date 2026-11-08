@@ -17,8 +17,8 @@ from audit_agent.scope_token import ScopeTokenError, sign, verify
 from audit_agent.tools import ToolContext, tools_for
 from audit_agent.verifier import LLMVerifier, Verdict
 
-from conftest import (ADMIN, DBNAME, G_CRIT, GHSA, GROWTH, U_HIGH, FakeGitHub, FakeLLM, _admin_dsn, call, say,
-                      tools)
+from conftest import (ADMIN, DBNAME, G_CRIT, G_LOW, GHSA, GROWTH, U_HIGH, UK, FakeGitHub, FakeLLM, _admin_dsn, call, say,
+                      fix_sha, tools)
 
 KEY = b"k" * 32
 LEAD = Scope(user_id="lead-growth", team_ids=("growth_engineering",), role="team_lead")
@@ -233,8 +233,12 @@ def test_fix_drafts_pauses_for_approval_and_opens_a_pr(db, fix_service):
 
     deps = deps_for(db, fix_client=client)
     assert api.reviews(deps, LEAD, {})[1]["fixes"][0]["fix_request_id"] == fid
-    assert api.decide_fix(deps, GROWTH, {"fix_request_id": fid, "decision": "approved"})[0] == 403
-    status, out = api.decide_fix(deps, LEAD, {"fix_request_id": fid, "decision": "approved"})
+    sha = fix_sha(deps, LEAD, fid)
+    assert api.decide_fix(deps, LEAD, {"fix_request_id": fid, "decision": "approved"})[0] == 400   # unseen content
+    assert api.decide_fix(deps, LEAD, {"fix_request_id": fid, "decision": "approved",
+                                       "content_sha256": "0" * 64})[0] == 409                       # not what's there
+    assert api.decide_fix(deps, GROWTH, {"fix_request_id": fid, "decision": "approved", "content_sha256": sha})[0] == 403
+    status, out = api.decide_fix(deps, LEAD, {"fix_request_id": fid, "decision": "approved", "content_sha256": sha})
     assert status == 200 and out == {"fix_request_id": fid, "status": "opened",
                                      "pr_url": "https://github.com/x/mktp-growth-api/pull/7"}
     assert [c[0] for c in writer.calls] == ["branch", "put", "pr"] and '"^2.3.4"' in writer.calls[1][3]
@@ -600,7 +604,9 @@ def test_approving_without_the_fix_bot_app_says_what_is_missing(db, fix_service,
                               open_pr=lambda scope, fid: open_fix_pr(db, scope, fid)), service.graph.checkpointer)
     client = LocalFixClient(real)
     fid = client.request_fix(GROWTH, G_CRIT)["fix_request_id"]
-    status, out = api.decide_fix(deps_for(db, fix_client=client), LEAD, {"fix_request_id": fid, "decision": "approved"})
+    deps = deps_for(db, fix_client=client)
+    status, out = api.decide_fix(deps, LEAD, {"fix_request_id": fid, "decision": "approved",
+                                              "content_sha256": fix_sha(deps, LEAD, fid)})
     assert status == 200 and out["status"] == "failed" and "fix-bot GitHub App is not set up" in out["error"]
 
 
@@ -659,8 +665,9 @@ def test_one_fix_covers_every_advisory_for_the_package(db, fix_service):
     assert again["fix_request_id"] == d["fix_request_id"] and "covers this finding" in again["note"]
     card = api.reviews(deps_for(db, fix_client=client), LEAD, {})[1]["fixes"][0]
     assert sorted(card["covers"]) == sorted([f"F-{G_CRIT}", f"F-{SIBLING}"]) and card["package"] == "example-http-lib"
-    status, out = api.decide_fix(deps_for(db, fix_client=client), LEAD,
-                                 {"fix_request_id": d["fix_request_id"], "decision": "approved"})
+    deps = deps_for(db, fix_client=client)
+    status, out = api.decide_fix(deps, LEAD, {"fix_request_id": d["fix_request_id"], "decision": "approved",
+                                              "content_sha256": fix_sha(deps, LEAD, d["fix_request_id"])})
     assert status == 200 and out["status"] == "opened"
     pr = [c for c in writer.calls if c[0] == "pr"][0]
     assert len(owner("select id from fix_requests")) == 1
@@ -679,3 +686,119 @@ def test_breaking_change_rule():
     from fix_agent.manifest import is_breaking
     assert is_breaking("^2.3.1", "3.0.0") and is_breaking("0.21.0", "0.30.0") and is_breaking("==1.23", "2.0")
     assert not is_breaking("^2.3.1", "2.4.0") and not is_breaking("0.21.0", "0.21.1")
+
+
+# ── Access hardening (Nov 2026 review) ─────────────────────────────────────
+def test_code_search_cannot_widen_to_other_repos(db):
+    """GitHub ORs repeated `repo:` qualifiers: a query carrying one would search another team's repo."""
+    import httpx
+
+    from audit_agent.github import GitHubToken
+    from audit_agent.tools import tools_for
+    from audit_agent.tools.base import ToolContext, ToolError
+
+    search = next(t for t in tools_for("chat") if t.name == "search_code")
+    for bad in ("password repo:x/mktp-uk-site", 'axios" OR "secret', "token org:x", "a user:someone"):
+        with pytest.raises(ToolError, match="Invalid arguments"):
+            search.parse(json.dumps({"repo": "mktp-growth-api", "query": bad}))
+    seen = {}
+
+    def handler(request):
+        seen["q"] = request.url.params["q"]
+        return httpx.Response(200, json={"items": [
+            {"path": "a.js", "repository": {"full_name": "x/mktp-growth-api"}, "text_matches": [{"fragment": "ok"}]},
+            {"path": "b.js", "repository": {"full_name": "x/mktp-uk-site"}, "text_matches": [{"fragment": "LEAK"}]}]})
+    gh = GitHubToken("x", "t", http=httpx.Client(transport=httpx.MockTransport(handler), base_url="https://api.github.com"))
+    hits = gh.search_code("mktp-growth-api", "axios", 5)
+    assert seen["q"] == '"axios" repo:x/mktp-growth-api' and [h["path"] for h in hits] == ["a.js"]
+    with pytest.raises(ValueError):
+        gh.search_code("mktp-growth-api", "x repo:x/mktp-uk-site", 5)          # the client refuses too
+    ctx = ToolContext(scope=GROWTH, db=db, github=gh)
+    assert search.handler(ctx, search.parse(json.dumps({"repo": "mktp-growth-api", "query": "axios"}))).data["hits"]
+
+
+def test_nobody_approves_their_own_fix(db, fix_service):
+    from audit_agent.fix_client import LocalFixClient
+    service, writer = fix_service
+    client = LocalFixClient(service)
+    fid = client.request_fix(LEAD, G_CRIT)["fix_request_id"]                    # the lead asks for it
+    deps = deps_for(db, fix_client=client)
+    sha = fix_sha(deps, LEAD, fid)
+    status, out = api.decide_fix(deps, LEAD, {"fix_request_id": fid, "decision": "approved", "content_sha256": sha})
+    assert status == 403 and "another lead" in out["error"] and writer.calls == []
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):                   # and the database agrees
+        with db.scoped(LEAD) as conn:
+            conn.execute("update fix_requests set status = 'approved', approver = %s where id = %s", (LEAD.user_id, fid))
+    status, out = api.decide_fix(deps, ADMIN, {"fix_request_id": fid, "decision": "approved", "content_sha256": sha})
+    assert status == 200 and out["status"] == "opened"
+
+
+def test_people_cannot_rewrite_drafts_or_fake_results(db, fix_service):
+    from audit_agent.fix_client import LocalFixClient
+    service, _ = fix_service
+    fid = LocalFixClient(service).request_fix(GROWTH, G_CRIT)["fix_request_id"]
+    for sql in ("update fix_requests set new_content = 'evil' where id = %s",
+                "update fix_requests set diff = '' where id = %s",
+                "update fix_requests set status = 'opened', pr_url = 'https://evil.example' where id = %s",
+                "update fix_requests set approved_sha256 = 'x' where id = %s"):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with db.scoped(GROWTH) as conn:
+                conn.execute(sql, (fid,))
+    worker = Scope(user_id="worker:fix", team_ids=("growth_engineering",), role="worker")
+    with db.scoped(worker) as conn:                                             # the agent still can
+        conn.execute("update fix_requests set rationale = 'updated by the agent' where id = %s", (fid,))
+
+
+def test_review_gate_tokens_are_for_deciders_only(db):
+    owner("insert into review_gates (run_id, task_token, pending) values ('run-1', 'secret-token', 1)")
+    with db.scoped(GROWTH) as conn:
+        assert conn.execute("select * from review_gates").fetchall() == []
+    with db.scoped(LEAD) as conn:
+        assert conn.execute("select task_token from review_gates").fetchone()["task_token"] == "secret-token"
+
+
+# ── Fix status on findings, and the full list ──────────────────────────────
+def test_findings_remember_their_fix(db, fix_service):
+    from audit_agent import brief
+    from audit_agent.fix_client import LocalFixClient
+    from audit_agent.tools import tools_for
+    from audit_agent.tools.base import ToolContext
+
+    service, _ = fix_service
+    add_sibling("2.3.4")
+    client = LocalFixClient(service)
+    fid = client.request_fix(GROWTH, G_CRIT)["fix_request_id"]
+    top = brief.build(db, GROWTH)["teams"][0]["top"]
+    by_id = {t["id"]: t for t in top}
+    assert by_id[f"F-{G_CRIT}"]["fix_request"]["status"] == "awaiting_approval"
+    assert by_id[f"F-{SIBLING}"]["fix_request"]["id"] == fid                    # covered by the same request
+    assert "fix_request" not in by_id[f"F-{G_LOW}"]
+    search = next(t for t in tools_for("chat") if t.name == "search_findings")
+    found = search.handler(ToolContext(scope=GROWTH, db=db), search.parse("{}")).data["findings"]
+    assert {f["id"]: f.get("fix", {}).get("status") for f in found}[f"F-{G_CRIT}"] == "awaiting_approval"
+    get = next(t for t in tools_for("chat") if t.name == "get_finding")
+    assert get.handler(ToolContext(scope=GROWTH, db=db), get.parse(json.dumps({"id": f"F-{SIBLING}"}))).data[
+        "fix_request"]["meaning"] == "a fix is drafted and waiting for a team lead"
+
+
+def test_findings_page_lists_everything_in_scope(db, fix_service):
+    from audit_agent import brief
+    from audit_agent.fix_client import LocalFixClient
+
+    for i in range(12):
+        owner("insert into findings (fingerprint, team_id, source, resource, rule, title, severity, data_class, "
+              "details, first_seen, last_seen) values (%s, 'growth_engineering', 'readme', 'repo-' || %s, 'r', "
+              "'Extra finding ' || %s, 'low', 'team', '{}', now(), now())", (f"d{i:015x}", i, i))
+    LocalFixClient(fix_service[0]).request_fix(GROWTH, G_CRIT)
+    page = brief.findings_page(db, GROWTH, {"size": "10"})
+    assert page["total"] == 14 and len(page["findings"]) == 10                  # 2 seeded + 12, admin-only hidden
+    assert page["findings"][0]["id"] == f"F-{G_CRIT}"                           # severity first
+    assert brief.findings_page(db, GROWTH, {"size": "10", "page": "2"})["findings"][-1]["title"].startswith("Extra")
+    assert brief.findings_page(db, GROWTH, {"fix": "in_progress"})["total"] == 1
+    assert brief.findings_page(db, GROWTH, {"fix": "none"})["total"] == 13
+    assert brief.findings_page(db, GROWTH, {"severity": "critical,high"})["total"] == 1
+    assert brief.findings_page(db, GROWTH, {"q": "Extra finding 1"})["total"] == 3   # 1, 10, 11
+    assert brief.findings_page(db, GROWTH, {"team": "uk_engineering"})["total"] == 0  # narrowing never grants
+    assert brief.findings_page(db, UK, {})["total"] == 1
+    assert brief.findings_page(db, ADMIN, {"team": "unowned"})["total"] == 1
+    assert brief.build(db, GROWTH)["teams"][0]["open_total"] == 14

@@ -3,8 +3,8 @@
     draft (ReAct: memory, infra repo, AWS) -> check (code) --need_input--> ask -> wait (interrupt) -> draft
                                                        \\--> publish -> await_approval (interrupt)
                                                                  -> open_pr | done
-The model never writes outside teams/<team>/ (submit_draft enforces it), never applies
-anything, and its files reach GitHub only after a lead approves exactly those files.
+Only security admins request drafts, for a repo they choose. The model never applies
+anything, and its files reach GitHub only after an admin approves exactly those files.
 Every database write sits in its own node BEFORE an interrupt: LangGraph re-runs an
 interrupted node from the top on resume.
 """
@@ -32,7 +32,7 @@ WORKER = "worker:infra"
 
 class InfraState(TypedDict, total=False):
     request_id: str
-    team_id: str
+    repo: str
     request: str
     qa: list
     rounds: int
@@ -51,9 +51,9 @@ class InfraDeps:
     tools: Callable[[], list]                            # -> the infra-mode tools (in-process or via Gateway)
     llm_for: Callable[[tuple[str, ...]], Any]
     model: str
-    read_infra: Callable[[Scope, str], str | None]       # current content of a path in the infra repo
+    read_infra: Callable[[Scope, str, str], str | None]  # (scope, repo, path) -> current content
     open_pr: Callable[[Scope, str], dict]                # (scope, request_id) -> {"pr_url"}
-    repo: str = "demo-infra-terraform"
+    repo: str = "demo-infra-terraform"                   # default when a request names no repo
     github: Any = None                                   # for in-process repo tools
     aws: Any = None                                      # for in-process AWS tools
     max_questions: int = 2
@@ -61,8 +61,10 @@ class InfraDeps:
     extra_config: dict = field(default_factory=dict)
 
 
-def worker_scope(team_id: str) -> Scope:
-    return Scope(user_id=WORKER, team_ids=(team_id,), role="worker")
+def worker_scope() -> Scope:
+    """The drafter acts for a security admin: it sees every request, convention and AWS
+    resource. The guard trigger knows it as an agent by its user id (worker:...)."""
+    return Scope(user_id=WORKER, team_ids=(), role="security_admin")
 
 
 def unified_diff(path: str, old: str | None, new: str) -> str:
@@ -73,12 +75,13 @@ def unified_diff(path: str, old: str | None, new: str) -> str:
 def build_infra_graph(deps: InfraDeps, checkpointer):
     def update(state: InfraState, **cols) -> None:
         sets = ", ".join(f"{k} = %s" for k in cols)
-        with deps.db.scoped(worker_scope(state["team_id"])) as conn:
+        with deps.db.scoped(worker_scope()) as conn:
             conn.execute(f"update infra_requests set {sets}, updated_at = now() where id = %s",
                          (*cols.values(), state["request_id"]))
 
     def draft(state: InfraState) -> dict:
-        scope = worker_scope(state["team_id"])
+        scope = worker_scope()
+        repo = state.get("repo") or deps.repo
 
         def on_step(step: dict) -> None:
             try:
@@ -91,30 +94,30 @@ def build_infra_graph(deps: InfraDeps, checkpointer):
 
         convo = "\n".join(f"You asked: {x['q']}\nThe requester answered: {x['a']}" for x in state.get("qa") or [])
         messages = [
-            {"role": "system", "content": INFRA_SYSTEM.format(team=state["team_id"], repo=deps.repo)},
-            {"role": "user", "content": f"Request from the {state['team_id']} team:\n{state['request']}"
+            {"role": "system", "content": INFRA_SYSTEM.format(repo=repo)},
+            {"role": "user", "content": f"Request for {repo}:\n{state['request']}"
                                         + (f"\n\nEarlier questions:\n{convo}" if convo else "")},
         ]
         ctx = ToolContext(scope=scope, db=deps.db, github=deps.github, mode="infra", aws=deps.aws,
-                          extra={"infra_repo": deps.repo, "request_id": state["request_id"], "team": state["team_id"]})
+                          extra={"infra_repo": repo, "request_id": state["request_id"]})
         cfg = HarnessConfig(mode="infra", model=deps.model, max_rounds=12, max_tokens_total=90_000,
                             max_output_tokens=4_000, deadline_s=deps.deadline_s)
-        res = Harness(deps.llm_for((state["team_id"],)), deps.tools(), cfg).run(ctx, messages, on_step=on_step)
+        res = Harness(deps.llm_for(()), deps.tools(), cfg).run(ctx, messages, on_step=on_step)
         if res.status != "submitted" or not isinstance(res.data, dict):
             return {"error": f"The drafter did not finish ({res.status}). Try a more specific request."}
         return {"draft": res.data, "decision": res.data["decision"]}
 
     def check(state: InfraState) -> dict:
         files = state["draft"].get("files") or []
-        scope = worker_scope(state["team_id"])
+        scope = worker_scope()
         diffs = []
         for f in files:
             try:
-                old = deps.read_infra(scope, f["path"])
+                old = deps.read_infra(scope, state.get("repo") or deps.repo, f["path"])
             except Exception:  # noqa: BLE001 - a missing file is a new file
                 old = None
             diffs.append(unified_diff(f["path"], old, f["content"]))
-        return {"checks": infra_checks.run(files, state["team_id"]) if files else [], "diff": "".join(diffs)}
+        return {"checks": infra_checks.run(files) if files else [], "diff": "".join(diffs)}
 
     def after_check(state: InfraState) -> str:
         if state.get("error"):
@@ -130,6 +133,14 @@ def build_infra_graph(deps: InfraDeps, checkpointer):
     def wait_answer(state: InfraState) -> dict:
         reply = interrupt({"request_id": state["request_id"], "question": state["draft"]["question"]})
         qa = list(state.get("qa") or []) + [{"q": state["draft"]["question"], "a": str(reply.get("answer", ""))[:2000]}]
+        # Runs once, on resume (the code after interrupt()); progress is the worker's to write.
+        try:
+            with deps.db.scoped(worker_scope()) as conn:
+                conn.execute("update infra_requests set steps = steps || "
+                             "'[{\"kind\": \"thinking\", \"label\": \"Got the answer; drafting again\"}]'::jsonb, "
+                             "updated_at = now() where id = %s", (state["request_id"],))
+        except Exception:  # noqa: BLE001 - progress is best-effort
+            log.warning("could not record a step", exc_info=True)
         return {"qa": qa, "rounds": state.get("rounds", 0) + 1}
 
     def give_up(state: InfraState) -> dict:
@@ -159,7 +170,7 @@ def build_infra_graph(deps: InfraDeps, checkpointer):
 
     def open_pr(state: InfraState) -> dict:
         try:
-            out = deps.open_pr(worker_scope(state["team_id"]), state["request_id"])
+            out = deps.open_pr(worker_scope(), state["request_id"])
             return {"pr_url": out.get("pr_url", "")}
         except Exception as exc:  # noqa: BLE001
             update(state, status="failed", error=str(exc)[:500])

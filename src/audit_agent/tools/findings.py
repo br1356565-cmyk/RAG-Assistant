@@ -15,6 +15,23 @@ SEV_ORDER = "array_position(array['critical','high','medium','low','info'], seve
 MAX_DETAIL_CHARS = 3000
 
 
+FIX_LABELS = {"drafting": "a fix is being drafted", "awaiting_approval": "a fix is drafted and waiting for a team lead",
+              "approved": "a fix was approved; the PR is being opened", "opened": "a fix PR is open",
+              "rejected": "a drafted fix was rejected", "failed": "drafting or opening a fix failed"}
+
+
+def fix_status(conn, fingerprints: list[str]) -> dict[str, dict]:
+    """Latest fix request per finding (a request covers every finding for its package)."""
+    if not fingerprints:
+        return {}
+    rows = conn.execute(
+        "select f.fp, x.status, x.pr_url from unnest(%s::text[]) as f(fp) join lateral ("
+        "  select status, pr_url from fix_requests x where x.fingerprint = f.fp or f.fp = any (x.covers) "
+        "  order by created_at desc, id desc limit 1) x on true", (list(fingerprints),)).fetchall()
+    return {r["fp"]: {"status": r["status"], "meaning": FIX_LABELS.get(r["status"], r["status"]),
+                      **({"pr": r["pr_url"]} if r["pr_url"] else {})} for r in rows}
+
+
 class TeamArg(Args):
     team: str | None = Field(
         None,
@@ -78,7 +95,8 @@ class SearchArgs(TeamArg):
 @tool(
     "search_findings",
     "Find findings by source, severity, status, repo, text or date. Returns the total match count and "
-    "the top results ordered by severity then age. Cite results as [F-<id>].",
+    "the top results ordered by severity then age, with any fix already drafted or opened. "
+    "Cite results as [F-<id>].",
     SearchArgs, {"chat"},
 )
 def search_findings(ctx: ToolContext, a: SearchArgs) -> ToolResult:
@@ -104,10 +122,12 @@ def search_findings(ctx: ToolContext, a: SearchArgs) -> ToolResult:
             f"from findings where {clause} order by {SEV_ORDER}, first_seen limit %s",
             params + [a.limit],
         ).fetchall()
+        fixes = fix_status(conn, [r["fingerprint"] for r in rows])
     items = [{
         "id": ref(r["fingerprint"]), "team": r["team_id"], "source": r["source"], "resource": r["resource"],
         "title": r["title"], "severity": r["severity"], "status": r["status"],
         "open_days": (ctx.now - r["first_seen"]).days,
+        **({"fix": fixes[r["fingerprint"]]} if r["fingerprint"] in fixes else {}),
     } for r in rows]
     return ToolResult({"total": total, "returned": len(items), "findings": items},
                       finding_ids={r["fingerprint"] for r in rows})
@@ -135,7 +155,8 @@ def load_finding(ctx: ToolContext, fingerprint: str) -> dict:
             "select kind, text, expires_at from team_notes where fingerprint = %s and status = 'active' "
             "and (expires_at is null or expires_at >= current_date)", (fingerprint,)
         ).fetchall()
-    return {"finding": f, "events": events, "investigation": inv, "notes": notes}
+        fix = fix_status(conn, [fingerprint]).get(fingerprint)
+    return {"finding": f, "events": events, "investigation": inv, "notes": notes, "fix": fix}
 
 
 @tool(
@@ -160,6 +181,8 @@ def get_finding(ctx: ToolContext, a: FindingArg) -> ToolResult:
         "active_notes": [{"kind": n["kind"], "text": n["text"],
                           "expires": n["expires_at"].isoformat() if n["expires_at"] else None} for n in d["notes"]],
     }
+    if d.get("fix"):
+        out["fix_request"] = d["fix"]
     inv = d["investigation"]
     if inv and inv["state"] in ("auto", "approved"):
         out["latest_investigation"] = {

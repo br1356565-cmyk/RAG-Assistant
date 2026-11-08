@@ -96,9 +96,13 @@ def flow_cases() -> list[tuple[str, bool, str]]:
                 continue
             ok = d["status"] == "awaiting_approval" and d["change"] == want
             results.append((f"flow F-{fp[:6]}… draft", ok, d.get("change") or d.get("error", "")))
-            status, _ = api.decide_fix(deps, scope, {"fix_request_id": d["fix_request_id"], "decision": "approved"})
+            sha = next(f["content_sha256"] for f in api.reviews(deps, lead[lead_key], {})[1]["fixes"]
+                       if f["fix_request_id"] == d["fix_request_id"])
+            status, _ = api.decide_fix(deps, scope, {"fix_request_id": d["fix_request_id"], "decision": "approved",
+                                                     "content_sha256": sha})
             results.append((f"flow F-{fp[:6]}… member can't approve", status == 403, str(status)))
-            status, body = api.decide_fix(deps, lead[lead_key], {"fix_request_id": d["fix_request_id"], "decision": "approved"})
+            status, body = api.decide_fix(deps, lead[lead_key], {"fix_request_id": d["fix_request_id"],
+                                                                 "decision": "approved", "content_sha256": sha})
             ok = status == 200 and body.get("status") == "opened"
             from urllib.parse import urlparse
             pr_dir = pathlib.Path(urlparse(body.get("pr_url", "file:///nowhere")).path)

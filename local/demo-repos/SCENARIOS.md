@@ -59,6 +59,11 @@ rather than expecting a specific item.
 
 Set up the fix-bot GitHub App first (DEPLOY-DEMO.md step 6b.4), or approvals stop short of a PR.
 
+Draft as a member and approve as the lead: nobody approves their own request. After drafting,
+the finding shows where its fix stands in the brief and on **Findings** (waiting for a lead,
+PR opened with its link, rejected or failed with "Draft again"), and chat says so instead of
+suggesting another fix.
+
 | Finding | What the agent drafts | Lead should |
 |---|---|---|
 | axios (`demo-shop-web`) | **One** fix covering every open axios advisory, at the highest first-patched version among them. With today's advisories that is a new 0.x minor or 1.x, so it carries the **major upgrade** badge | **Approve** if you accept the breaking-change risk (CI runs the tests); otherwise **reject**. Drafting from any other axios finding points at this same fix |
@@ -117,24 +122,28 @@ Failed controls become findings like any other: owned by the resource's `team` t
 AWS findings team), investigated, shown in the brief. GuardDuty findings that Security Hub
 also carries are skipped when the guardduty collector runs, so nothing is reported twice.
 
-## 9. Terraform drafter (Infra requests page; `infra_drafter_enabled`)
+## 9. Terraform drafter (Infra requests page; `infra_drafter_enabled`; security admins only)
 
-The drafter reads approved conventions, the team's past requests, `demo-infra-terraform`
-and (with Config on) the team's tagged AWS resources, then answers reuse / new / refuse,
-or asks one question. Code checks (team folder, HCL parses, team tag, no provider/backend,
-no secrets, no `*` IAM actions, no public access) are shown as warnings next to the diff; the
-lead decides. These outcomes depend on the model, so treat them as [Likely], not guaranteed.
+Only a security admin sees **Infra requests** and **Conventions**; members and leads don't get
+the pages, and the API and database refuse them. The admin picks any repo the fix-bot App is
+installed on (`demo-infra-terraform` by default). The drafter reads approved conventions, past
+requests, that repo and (with Config on) every tagged AWS resource, then answers reuse / new /
+refuse, or asks one question. Code checks (HCL parses, a `team` tag, no provider/backend, no
+secrets, no `*` IAM actions, no public access) appear as warnings next to the diff. The admin
+may approve their own draft; the PR review in GitHub is the second check. These outcomes depend
+on the model, so treat them as [Likely], not guaranteed.
 
 | As | Request | Expected |
 |---|---|---|
-| web member | "A queue for order events from the storefront" | **Reuse**: `teams/web/main.tf` already has `web-orders`; no files, or a small wiring change |
-| web member | "A private bucket for marketing banners, delete after 90 days" | **New**: `module "..." { source = "../../modules/s3" ... expire_days = 90 }` in `teams/web/`, all checks green |
-| web member | "A queue for password-reset emails" | Often asks one question first (retention, visibility timeout); answer it on the request and it drafts |
-| data member | "Make data-exports public so partners can download files" | **Refuse** (convention 1 and the module block public access), or a draft with the public-access warning |
-| web member | "Add a bucket in teams/data for us" | Can't: the submit tool refuses any path outside `teams/web/`; it drafts in `teams/web/` or explains |
-| team lead | Reject a draft with "Image buckets must expire after 365 days" | The reason appears under **Conventions** as *proposed*; approve it, then ask for another image bucket: the draft follows it and its reasoning names it |
-| data member | Open **Infra requests** | Sees none of the web team's requests (row-level security) |
-| team lead | **Approve and open PR** | A PR on `demo-infra-terraform` touching only `teams/<team>/`, titled `infra(<team>): ...`, with the checks in the body. If the files change after approval, the PR is refused |
+| admin, repo `demo-infra-terraform` | "A queue for order events from the web storefront" | **Reuse**: `teams/web/main.tf` already has `web-orders`; no files, or a small wiring change |
+| admin | "A private bucket for the web team's marketing banners, delete after 90 days" | **New**: `module "..." { source = "../../modules/s3" ... expire_days = 90 }` in `teams/web/`, all checks green |
+| admin | "A queue for password-reset emails" | Often asks first (which team owns it, retention); answer on the request and it drafts |
+| admin | "Make data-exports public so partners can download files" | **Refuse** (convention 1; the module blocks public access), or a draft with the public-access warning |
+| admin, repo `demo-shop-web` | "Add a Terraform folder with an SQS queue for order emails" | Drafts `.tf` files in that repo; the PR opens there |
+| admin, repo `no-such-repo` | anything | Refused before drafting: the repo isn't readable by the GitHub App |
+| admin | Reject a draft with "Image buckets must expire after 365 days" | The reason appears under **Conventions** as *proposed*; approve it, then ask for another image bucket: the draft follows it and names it |
+| admin | **Approve and open PR** on their own draft | A PR on the chosen repo, titled `infra: ...`, with the checks in the body. If the files change after approval (even by an admin by hand), the PR is refused |
+| web member / team lead | Open `#infra` | Back on the Brief; no Infra or Conventions link |
 
 Nothing is ever applied: the PR is where `terraform plan` and a human review happen.
 
