@@ -202,7 +202,7 @@ resource "aws_secretsmanager_secret_version" "litellm" {
 resource "aws_security_group" "litellm" {
   count       = local.litellm ? 1 : 0
   name        = "${local.name}-litellm"
-  description = "LiteLLM proxy: reachable only from the stack's Lambdas and runtimes"
+description = "LiteLLM proxy - reachable only from the stack Lambdas and AgentCore runtimes"
   vpc_id      = local.vpc_id
 }
 
@@ -231,7 +231,7 @@ resource "aws_vpc_security_group_ingress_rule" "db_from_litellm" {
   ip_protocol                  = "tcp"
   from_port                    = 5432
   to_port                      = 5432
-  description                  = "LiteLLM's own database"
+  description = "LiteLLM database"
 }
 
 resource "aws_service_discovery_private_dns_namespace" "internal" {
