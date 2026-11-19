@@ -567,9 +567,14 @@ variable "litellm_cpu" {
 }
 
 variable "litellm_memory" {
+<<<<<<< HEAD
   type        = number
   default     = 2048
   description = "MiB. 1024 is not enough: the task is OOM-killed (exit 137) during startup, before it logs anything."
+=======
+  type    = number
+  default = 2048
+>>>>>>> 7a116e7d265ae9235056a87810b0ff85caa3b333
 }
 
 variable "litellm_cpu_architecture" {
