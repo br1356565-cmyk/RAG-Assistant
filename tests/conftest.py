@@ -61,7 +61,7 @@ def seeded(pg):
         c.execute("truncate teams, repo_owners, findings, finding_events, weekly_aggregates, runs, "
                   "run_collectors, investigations, team_notes, session_turns, user_prefs, audit_log, chat_jobs, "
                   "investigation_reviews, review_gates, answer_feedback, fix_requests, infra_requests, "
-                  "infra_conventions cascade")
+                  "infra_conventions, team_changes cascade")
         c.execute("insert into teams values ('growth_engineering','Growth Engineering','g-growth'),"
                   "('uk_engineering','App Engineering','g-uk')")
         c.execute("insert into repo_owners (repo, team_id, source) values "

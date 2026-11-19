@@ -952,11 +952,10 @@
   }
   loaders.conventions = loadConventions;
 
-  // ── Teams (dashboard-managed membership, ownership and delivery) ─────────
-  async function teamPost(path, body, status) {
-    try { await postJSON(`/api/teams/${path}`, body); await loadTeams(); }
-    catch (err) { if (status) status.textContent = err.message; else alert(err.message); }
-  }
+  // ── Teams (dashboard-managed; built for hundreds of repos) ───────────────
+  // Teams tab: searchable team list + one team's detail (members, repos, URLs, rules, report, activity).
+  // Repositories tab: every repo, filter / sort / page, multi-select and bulk assign, CSV import/export.
+  const qs = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== "" && v !== false && v != null)).toString();
   const field = (type, placeholder, value, max) => {
     const i = el("input"); i.type = type; i.placeholder = placeholder || "";
     if (value !== undefined && value !== null) i.value = value;
@@ -969,137 +968,240 @@
     if (value !== undefined) s.value = value;
     return s;
   };
-  function rowList(items, render) {
-    const ul = el("ul", "row-list");
-    if (!items.length) ul.appendChild(el("li", "muted", "None yet."));
-    for (const it of items) { const li = el("li"); render(li, it); ul.appendChild(li); }
-    return ul;
-  }
+  const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+  const SOURCE_LABEL = (r) => !r.team_id ? ["Unowned", "bad"] : r.pinned ? ["Assigned", "ok"]
+    : String(r.source).startsWith("dashboard rule") ? ["Rule", "info"] : ["ownership.yml", "neutral"];
+  const teamsState = { tab: "teams", selected: null, summary: null, teamFilter: "" };
 
   async function loadTeams() {
     const box = $("teams");
-    let data;
-    try { data = await getJSON("/api/teams"); } catch (err) { box.replaceChildren(el("div", "muted", err.message)); return; }
-    if (!data) return;
+    let sum;
+    try { sum = await getJSON("/api/teams"); } catch (err) { box.replaceChildren(el("div", "muted", err.message)); return; }
+    if (!sum) return;
+    teamsState.summary = sum;
+    if (!teamsState.selected || !sum.teams.some((t) => t.id === teamsState.selected)) teamsState.selected = sum.teams[0]?.id || null;
     box.replaceChildren();
-    const grid = el("div", "team-grid");
-    const ids = data.teams.filter((t) => !t.archived).map((t) => [t.id, t.name]);
-
-    if (data.is_admin) {
-      const c = el("div", "card");
-      const name = field("text", "Team name, e.g. Payments", "", 80);
-      const st = el("span", "muted");
-      const form = el("div", "inline-form");
-      form.append(name, button("Create team", "small primary", () => {
-        if (name.value.trim().length < 2) { st.textContent = "Name the team first."; return; }
-        teamPost("create", { name: name.value.trim() }, st);
-      }), st);
-      c.append(el("div", "item-title", "New team"), form);
-      grid.appendChild(c);
-
-      if (data.unowned_repos.length) {
-        const u = el("div", "card");
-        u.appendChild(el("div", "item-title", `Unowned repos (${data.unowned_repos.length})`));
-        u.appendChild(el("div", "muted", "Their findings are visible to admins only until a team owns them."));
-        const list = el("div", "unowned");
-        for (const r of data.unowned_repos) {
-          const l = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.value = r;
-          l.append(cb, document.createTextNode(` ${r}`)); list.appendChild(l);
-        }
-        const team = selectOf(ids);
-        const st2 = el("span", "muted");
-        const row = el("div", "actions");
-        row.append(team, button("Assign selected", "small", () => {
-          const repos = [...list.querySelectorAll("input:checked")].map((x) => x.value);
-          if (!repos.length) { st2.textContent = "Tick at least one repo."; return; }
-          teamPost("assign", { team_id: team.value, repos }, st2);
-        }), st2);
-        u.append(list, row);
-        grid.appendChild(u);
-      }
+    const tabs = el("div", "subtabs");
+    const pages = [["teams", `Teams (${sum.teams.length})`], ["repos", sum.is_admin ? `Repositories (${sum.repos_total})` : "Repositories"]];
+    if (sum.is_admin) pages.push(["activity", "Activity"]);
+    for (const [id, label] of pages) {
+      const b = button(label, `subtab${teamsState.tab === id ? " active" : ""}`, () => { teamsState.tab = id; loadTeams(); });
+      tabs.appendChild(b);
     }
-
-    if (!data.teams.length) grid.appendChild(el("div", "card muted", "You are not in any team yet."));
-    for (const t of data.teams) grid.appendChild(teamCard(t, data.is_admin));
-    box.appendChild(grid);
+    if (sum.is_admin && sum.unowned) {
+      tabs.appendChild(button(`${sum.unowned} unowned repos`, "subtab warn", () => {
+        teamsState.tab = "repos"; teamsState.repoPreset = { team: "unowned" }; loadTeams();
+      }));
+    }
+    box.appendChild(tabs);
+    const body = el("div");
+    box.appendChild(body);
+    if (teamsState.tab === "repos") repoTable(body, { admin: sum.is_admin, teams: sum.teams, preset: teamsState.repoPreset });
+    else if (teamsState.tab === "activity") activityList(body, null);
+    else teamsMaster(body, sum);
+    teamsState.repoPreset = null;
   }
 
-  function teamCard(t, isAdmin) {
+  function teamsMaster(host, sum) {
+    const grid = el("div", "master");
+    const list = el("div", "card team-list");
+    const search = field("search", "Find a team…", teamsState.teamFilter, 60);
+    const rows = el("div");
+    const draw = () => {
+      rows.replaceChildren();
+      const f = search.value.trim().toLowerCase();
+      teamsState.teamFilter = search.value;
+      for (const t of sum.teams.filter((x) => !f || x.name.toLowerCase().includes(f) || x.id.includes(f))) {
+        const r = el("button", `team-row${t.id === teamsState.selected ? " active" : ""}${t.archived ? " archived" : ""}`);
+        r.type = "button";
+        const top = el("div", "team-row-top");
+        top.append(el("span", "team-row-name", t.name));
+        if (t.high) top.append(el("span", "pill bad", String(t.high)));
+        const meta = el("div", "muted", `${t.members} members · ${t.repos} repos${t.archived ? " · archived" : ""}`);
+        r.append(top, meta);
+        r.addEventListener("click", () => { teamsState.selected = t.id; draw(); teamDetail(detail, t.id); });
+        rows.appendChild(r);
+      }
+      if (!rows.children.length) rows.appendChild(el("div", "muted pad", "No teams match."));
+    };
+    search.addEventListener("input", draw);
+    list.appendChild(search);
+    if (sum.is_admin) {
+      const name = field("text", "New team name", "", 80);
+      const f = el("div", "inline-form");
+      const st = el("div", "muted");
+      f.append(name, button("Create", "small", async () => {
+        if (name.value.trim().length < 2) { st.textContent = "Name the team first."; return; }
+        try { const r = await postJSON("/api/teams/create", { name: name.value.trim() }); teamsState.selected = r.data.team_id; loadTeams(); }
+        catch (err) { st.textContent = err.message; }
+      }));
+      list.append(f, st);
+    }
+    list.appendChild(rows);
+    const detail = el("div");
+    grid.append(list, detail);
+    host.appendChild(grid);
+    draw();
+    if (teamsState.selected) teamDetail(detail, teamsState.selected);
+    else detail.appendChild(el("div", "card empty", "You are not in any team yet. Ask a security admin to add you."));
+  }
+
+  async function teamDetail(host, teamId) {
+    host.replaceChildren(el("div", "card muted", "Loading…"));
+    let t;
+    try { t = await getJSON(`/api/teams/detail?${qs({ team_id: teamId })}`); } catch (err) { host.replaceChildren(el("div", "card muted", err.message)); return; }
+    const s = (teamsState.summary.teams || []).find((x) => x.id === teamId) || {};
     const card = el("div", "card");
     const head = el("div", "team-head");
     const title = el("div", "item-title");
     title.append(el("h2", null, t.name), chip(t.id, "neutral"));
     if (t.archived) title.appendChild(chip("archived", "warn"));
-    if (t.source === "config") title.appendChild(chip("from ownership.yml", "info"));
-    const stats = el("div", "muted", `${t.open} open · ${t.open_high} high+ · ${t.jira_open} Jira tickets open`);
-    head.append(title, stats);
-    card.appendChild(head);
-    const st = el("div", "muted");
-
-    const cols = el("div", "team-cols");
-
-    // Members
-    const mem = el("div");
-    mem.appendChild(el("h3", null, `Members (${t.members.length})`));
-    mem.appendChild(rowList(t.members, (li, m) => {
-      const who = el("span"); who.append(document.createTextNode(m.email + " "), chip(m.role, m.role === "lead" ? "info" : "neutral"));
-      li.appendChild(who);
-      if (t.can_manage && (isAdmin || m.role === "member")) {
-        li.appendChild(button("Remove", "small danger", () => teamPost("member", { team_id: t.id, email: m.email, remove: true }, st)));
-      }
-    }));
-    if (t.can_manage) {
-      const email = field("email", "name@company.com", "", 254);
-      const role = selectOf(isAdmin ? [["member", "member"], ["lead", "lead"]] : [["member", "member"]]);
-      const f = el("div", "inline-form");
-      f.append(email, role, button("Add", "small", () => teamPost("member", { team_id: t.id, email: email.value.trim(), role: role.value }, st)));
-      mem.appendChild(f);
-    }
-    cols.appendChild(mem);
-
-    // Owned repos and URLs
-    const own = el("div");
-    own.appendChild(el("h3", null, "Assigned repos & URLs"));
-    own.appendChild(rowList(t.assets, (li, a) => {
-      li.append(el("span", null, `${a.kind === "url" ? "🌐" : "📦"} ${a.value}`));
-      if (isAdmin) li.appendChild(button("Unassign", "small", () => teamPost("asset", { team_id: t.id, kind: a.kind, value: a.value, remove: true }, st)));
-    }));
-    if (isAdmin) {
-      const kind = selectOf([["repo", "repo"], ["url", "URL (DAST)"]]);
-      const val = field("text", "repo-name or https://app.example.com", "", 300);
-      const f = el("div", "inline-form");
-      f.append(kind, val, button("Assign", "small", () => teamPost("asset", { team_id: t.id, kind: kind.value, value: val.value.trim() }, st)));
-      own.appendChild(f);
-    }
-    const det = el("details");
-    det.appendChild(el("summary", "muted", `${t.repos.length} repos owned in total (assigned + rules + ownership.yml)`));
-    det.appendChild(rowList(t.repos, (li, r) => li.append(el("span", null, r.repo), el("span", "muted", r.source))));
-    own.appendChild(det);
-    cols.appendChild(own);
-
-    // Rules
-    if (isAdmin || t.rules.length) {
-      const ru = el("div");
-      ru.appendChild(el("h3", null, "Ownership rules"));
-      ru.appendChild(el("div", "muted", "New repos matching these are owned automatically from the next run."));
-      ru.appendChild(rowList(t.rules, (li, r) => {
-        li.append(el("span", null, `${r.kind.replace("_", " ")}: ${r.value}`));
-        if (isAdmin) li.appendChild(button("Remove", "small", () => teamPost("rule", { team_id: t.id, kind: r.kind, value: r.value, remove: true }, st)));
+    if (t.source === "config") title.appendChild(chip("seeded from ownership.yml", "info"));
+    head.appendChild(title);
+    if (t.is_admin) {
+      const a = el("div", "actions");
+      a.append(button("Rename", "small", async () => {
+        const n = window.prompt("New team name", t.name);
+        if (n && n.trim() !== t.name) { await teamWrite("update", { team_id: t.id, name: n.trim() }); loadTeams(); }
+      }), button(t.archived ? "Restore" : "Archive", "small danger", async () => {
+        if (t.archived || window.confirm(`Archive ${t.name}? Its members lose access through this team.`)) {
+          await teamWrite("update", { team_id: t.id, archived: !t.archived }); loadTeams();
+        }
       }));
-      if (isAdmin) {
-        const kind = selectOf([["topic", "GitHub topic"], ["name_prefix", "name starts with"], ["name_contains", "name contains"]]);
-        const val = field("text", "e.g. team-payments or pay-", "", 100);
-        const f = el("div", "inline-form");
-        f.append(kind, val, button("Add rule", "small", () => teamPost("rule", { team_id: t.id, kind: kind.value, value: val.value.trim() }, st)));
-        ru.appendChild(f);
-      }
-      cols.appendChild(ru);
+      head.appendChild(a);
     }
+    card.appendChild(head);
+    const stats = el("div", "stats");
+    for (const [n, label, cls] of [[t.members.length, "members", ""], [s.repos ?? "–", "repos", ""], [t.urls.length, "URLs", ""],
+      [s.open ?? "–", "open findings", ""], [s.high ?? "–", "high + critical", s.high ? "bad" : ""], [s.jira_open ?? "–", "Jira open", ""]]) {
+      const b = el("div", `stat ${cls}`); b.append(el("div", "stat-n", String(n)), el("div", "muted", label)); stats.appendChild(b);
+    }
+    card.appendChild(stats);
+    const tabs = el("div", "subtabs small");
+    const pane = el("div", "pane");
+    const views = {
+      members: ["Members", () => membersPane(pane, t)],
+      repos: ["Repos", () => repoTable(pane, { admin: t.is_admin, teams: teamsState.summary.teams, fixedTeam: t.id })],
+      urls: ["URLs (DAST)", () => urlsPane(pane, t)],
+      rules: ["Ownership rules", () => rulesPane(pane, t)],
+      report: ["Report & Jira", () => reportPane(pane, t)],
+      activity: ["Activity", () => activityList(pane, t.id, t.activity)],
+    };
+    const go = (k) => {
+      teamsState.detailTab = k;
+      tabs.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.k === k));
+      pane.replaceChildren(); views[k][1]();
+    };
+    for (const [k, [label]] of Object.entries(views)) { const b = button(label, "subtab", () => go(k)); b.dataset.k = k; tabs.appendChild(b); }
+    card.append(tabs, pane);
+    host.replaceChildren(card);
+    go(views[teamsState.detailTab] ? teamsState.detailTab : "members");
+  }
 
-    // Notifications
+  async function teamWrite(path, body, status) {
+    try { const r = await postJSON(`/api/teams/${path}`, body); if (status) status.textContent = ""; return r.data; }
+    catch (err) { if (status) status.textContent = err.message; else window.alert(err.message); return null; }
+  }
+  const refreshDetail = () => loadTeams();
+
+  function membersPane(pane, t) {
+    const table = el("table", "grid-table");
+    const thead = el("tr"); ["E-mail", "Role", "Added by", ""].forEach((h) => thead.appendChild(el("th", null, h)));
+    table.appendChild(thead);
+    for (const m of t.members) {
+      const tr = el("tr");
+      const rc = el("td"); rc.appendChild(chip(m.role, m.role === "lead" ? "info" : "neutral"));
+      const act = el("td", "right");
+      if (t.can_manage && (t.is_admin || m.role === "member")) {
+        if (t.is_admin) act.appendChild(button(m.role === "lead" ? "Make member" : "Make lead", "small", async () => {
+          if (await teamWrite("member", { team_id: t.id, email: m.email, role: m.role === "lead" ? "member" : "lead" })) refreshDetail();
+        }));
+        act.appendChild(button("Remove", "small danger", async () => {
+          if (await teamWrite("member", { team_id: t.id, email: m.email, remove: true })) refreshDetail();
+        }));
+      }
+      tr.append(el("td", null, m.email), rc, el("td", "muted", m.added_by), act);
+      table.appendChild(tr);
+    }
+    if (!t.members.length) { const tr = el("tr"); const td = el("td", "muted", "No members yet."); td.colSpan = 4; tr.appendChild(td); table.appendChild(tr); }
+    pane.appendChild(table);
+    if (!t.can_manage) return;
+    const box = el("div", "bulk-add");
+    const ta = el("textarea"); ta.placeholder = "Paste e-mails: one per line, or separated by commas"; ta.rows = 3;
+    const role = selectOf(t.is_admin ? [["member", "as members"], ["lead", "as leads"]] : [["member", "as members"]]);
+    const st = el("span", "muted");
+    const add = button("Add people", "small primary", async () => {
+      const r = await teamWrite("members", { team_id: t.id, emails: ta.value, role: role.value }, st);
+      if (r) { st.textContent = `Added ${r.added}${r.invalid.length ? `; not e-mails: ${r.invalid.join(", ")}` : ""}`; setTimeout(refreshDetail, 900); }
+    });
+    const row = el("div", "actions"); row.append(role, add, st);
+    box.append(el("div", "item-title", "Add people"), ta, row);
+    pane.appendChild(box);
+  }
+
+  function urlsPane(pane, t) {
+    pane.appendChild(el("div", "muted", "Public URLs this team owns. The weekly DAST run does a passive ZAP baseline scan of each (no attack payloads)."));
+    const ul = el("ul", "row-list");
+    for (const u of t.urls) {
+      const li = el("li");
+      li.append(el("span", null, u.url), el("span", "muted", `${u.open} open`));
+      if (t.is_admin) li.appendChild(button("Remove", "small", async () => {
+        if (await teamWrite("asset", { team_id: t.id, kind: "url", value: u.url, remove: true })) refreshDetail();
+      }));
+      ul.appendChild(li);
+    }
+    if (!t.urls.length) ul.appendChild(el("li", "muted", "No URLs yet."));
+    pane.appendChild(ul);
+    if (!t.is_admin) return;
+    const v = field("url", "https://app.example.com", "", 300); const st = el("span", "muted");
+    const f = el("div", "inline-form");
+    f.append(v, button("Add URL", "small", async () => { if (await teamWrite("asset", { team_id: t.id, kind: "url", value: v.value.trim() }, st)) refreshDetail(); }), st);
+    pane.appendChild(f);
+  }
+
+  function rulesPane(pane, t) {
+    pane.appendChild(el("div", "muted", "Repos matching a rule belong to this team unless they are assigned explicitly or an earlier rule already owns them. Rules beat ownership.yml."));
+    const ul = el("ul", "row-list");
+    for (const r of t.rules) {
+      const li = el("li");
+      li.append(el("span", null, `${r.kind.replace("_", " ")}: ${r.value}`), el("span", "muted", `by ${r.added_by}`));
+      if (t.is_admin) li.appendChild(button("Remove", "small", async () => {
+        if (await teamWrite("rule", { team_id: t.id, kind: r.kind, value: r.value, remove: true })) refreshDetail();
+      }));
+      ul.appendChild(li);
+    }
+    if (!t.rules.length) ul.appendChild(el("li", "muted", "No rules yet."));
+    pane.appendChild(ul);
+    if (!t.is_admin) return;
+    const kind = selectOf([["name_prefix", "name starts with"], ["name_contains", "name contains"], ["topic", "has GitHub topic"]]);
+    const val = field("text", "e.g. pay- or team-payments", "", 100);
+    const preview = el("div", "preview muted");
+    const st = el("span", "muted");
+    const run = debounce(async () => {
+      const v = val.value.trim().toLowerCase();
+      if (!v) { preview.replaceChildren(); return; }
+      try {
+        const p = await getJSON(`/api/teams/rule-preview?${qs({ kind: kind.value, value: v })}`);
+        preview.replaceChildren(el("div", null, `Matches ${p.count} repos · ${p.would_change} would move to ${t.name} now`));
+        const names = el("div", "chips");
+        p.repos.slice(0, 40).forEach((r) => names.appendChild(chip(r.repo, r.pinned || String(r.source).startsWith("dashboard") ? "neutral" : "info")));
+        if (p.count > 40) names.appendChild(el("span", "muted", ` +${p.count - 40} more`));
+        preview.appendChild(names);
+      } catch (err) { preview.textContent = err.message; }
+    }, 300);
+    val.addEventListener("input", run); kind.addEventListener("change", run);
+    const f = el("div", "inline-form");
+    f.append(kind, val,
+      button("Save rule", "small", async () => { if (await teamWrite("rule", { team_id: t.id, kind: kind.value, value: val.value.trim() }, st)) refreshDetail(); }),
+      button("Save & apply now", "small primary", async () => {
+        const r = await teamWrite("rule", { team_id: t.id, kind: kind.value, value: val.value.trim(), apply_now: true }, st);
+        if (r) { st.textContent = `${r.changed} repos moved, ${r.findings_moved} findings moved`; setTimeout(refreshDetail, 1200); }
+      }), st);
+    pane.append(f, preview);
+  }
+
+  function reportPane(pane, t) {
     const s = t.settings;
-    const no = el("div");
-    no.appendChild(el("h3", null, "Weekly report & Jira"));
     const g = el("div", "settings-grid");
     const emailCb = el("input"); emailCb.type = "checkbox"; emailCb.checked = s.email_digest;
     const slack = field("url", s.slack ? `set (${s.slack_hint}); paste a new one to replace` : "https://hooks.slack.com/services/…", "", 300);
@@ -1109,44 +1211,205 @@
     const asg = field("email", "assignee e-mail (optional)", s.jira_assignee, 254);
     const slaC = field("number", "", s.sla_days.critical); slaC.min = 1; slaC.max = 365;
     const slaH = field("number", "", s.sla_days.high); slaH.min = 1; slaH.max = 365;
-    const canEdit = t.can_manage;
-    [emailCb, slack, jiraCb, proj, itype, asg, slaC, slaH].forEach((x) => { x.disabled = !canEdit; });
-    const pairs = [["E-mail every member", emailCb], ["Slack webhook", slack], ["Create Jira tickets", jiraCb],
-                   ["Jira project", proj], ["Issue type", itype], ["Assignee", asg],
-                   ["SLA critical (days)", slaC], ["SLA high (days)", slaH]];
-    for (const [label, input] of pairs) g.append(el("label", "muted", label), input);
-    no.appendChild(g);
-    if (canEdit) {
-      const save = button("Save", "small primary", () => {
-        const body = { team_id: t.id, email_digest: emailCb.checked, jira_enabled: jiraCb.checked,
-                       jira_project: proj.value.trim(), jira_issue_type: itype.value.trim() || "Bug",
-                       jira_assignee: asg.value.trim(), sla_days: { critical: +slaC.value, high: +slaH.value } };
-        if (slack.value.trim()) body.slack_webhook = slack.value.trim();
-        teamPost("settings", body, st);
-      });
-      const row = el("div", "actions"); row.appendChild(save);
-      if (s.slack) row.appendChild(button("Remove Slack", "small", () => teamPost("settings", { team_id: t.id, slack_webhook: "" }, st)));
-      no.appendChild(row);
+    [emailCb, slack, jiraCb, proj, itype, asg, slaC, slaH].forEach((x) => { x.disabled = !t.can_manage; });
+    for (const [label, input] of [["E-mail every member weekly", emailCb], ["Slack webhook", slack], ["Create Jira tickets", jiraCb],
+      ["Jira project", proj], ["Issue type", itype], ["Assignee", asg], ["SLA critical (days)", slaC], ["SLA high (days)", slaH]]) {
+      g.append(el("label", "muted", label), input);
     }
-    no.appendChild(el("div", "muted", "Tickets: one per repo + rule, high and critical only; closed automatically when fixed; leads are reminded in Jira when past SLA."));
-    cols.appendChild(no);
+    pane.appendChild(g);
+    pane.appendChild(el("div", "muted", "Jira: one ticket per repo + rule, high and critical only, closed automatically when fixed; the assignee and leads are reminded in Jira once a ticket passes the SLA."));
+    if (!t.can_manage) return;
+    const st = el("span", "muted");
+    const row = el("div", "actions");
+    row.append(button("Save", "small primary", async () => {
+      const body = { team_id: t.id, email_digest: emailCb.checked, jira_enabled: jiraCb.checked, jira_project: proj.value.trim(),
+                     jira_issue_type: itype.value.trim() || "Bug", jira_assignee: asg.value.trim(),
+                     sla_days: { critical: +slaC.value, high: +slaH.value } };
+      if (slack.value.trim()) body.slack_webhook = slack.value.trim();
+      if (await teamWrite("settings", body, st)) { st.textContent = "Saved."; }
+    }));
+    if (s.slack) row.appendChild(button("Remove Slack", "small", async () => { if (await teamWrite("settings", { team_id: t.id, slack_webhook: "" }, st)) refreshDetail(); }));
+    row.appendChild(st);
+    pane.appendChild(row);
+  }
 
-    card.appendChild(cols);
-    if (isAdmin) {
-      const adm = el("div", "actions");
-      const nm = field("text", "Rename", t.name, 80);
-      adm.append(nm, button("Rename", "small", () => teamPost("update", { team_id: t.id, name: nm.value.trim() }, st)),
-                 button(t.archived ? "Restore" : "Archive", "small danger", () => {
-                   if (t.archived || window.confirm(`Archive ${t.name}? Members lose access through this team.`)) {
-                     teamPost("update", { team_id: t.id, archived: !t.archived }, st);
-                   }
-                 }));
-      card.appendChild(adm);
+  async function activityList(host, teamId, preloaded) {
+    let items = preloaded;
+    if (!items) {
+      try { items = (await getJSON(`/api/teams/activity?${qs({ team_id: teamId || "" })}`)).activity; }
+      catch (err) { host.appendChild(el("div", "muted", err.message)); return; }
     }
-    card.appendChild(st);
-    return card;
+    const card = el("div", teamId ? "" : "card");
+    const ul = el("ul", "row-list");
+    const say = (a) => {
+      const d = a.detail || {};
+      switch (a.action) {
+        case "bulk_assign": return `assigned ${d.repos} repos${d.moved ? ` (${d.moved} findings moved)` : ""}`;
+        case "bulk_unpin": return `removed the assignment of ${d.repos} repos`;
+        case "set_asset": return `assigned ${d.kind} ${d.value}`;
+        case "remove_asset": return `unassigned ${d.kind} ${d.value}`;
+        case "apply_rule": return `applied rule ${d.kind} ${d.value} to ${d.repos} repos`;
+        case "set_rule": return `added rule ${d.kind} ${d.value}`;
+        case "remove_rule": return `removed rule ${d.kind} ${d.value}`;
+        case "set_member": return `set ${d.email} as ${d.role}`;
+        case "remove_member": return `removed ${d.email}`;
+        case "create_team": return `created the team`;
+        case "update_team": return d.archived === true ? "archived the team" : d.archived === false ? "restored the team" : `renamed the team to ${d.name}`;
+        case "settings": return "changed the report / Jira settings";
+        default: return a.action;
+      }
+    };
+    for (const a of items) {
+      const li = el("li");
+      li.append(el("span", null, `${a.actor} ${say(a)}${teamId ? "" : ` · ${a.team_id || ""}`}`), el("span", "muted", ago(a.at)));
+      ul.appendChild(li);
+    }
+    if (!items.length) ul.appendChild(el("li", "muted", "Nothing yet."));
+    card.appendChild(ul);
+    host.appendChild(card);
+  }
+
+  // Repo inventory: server-side filter, sort and paging; selection survives paging; "select all N matching".
+  function repoTable(host, opts) {
+    const st = { q: "", team: opts.fixedTeam || "", source: "", has_findings: false, sort: "repo", page: 1, size: 50,
+                 selected: new Set(), allMatching: false, total: 0, ...(opts.preset || {}) };
+    const wrap = el("div", opts.fixedTeam ? "" : "card");
+    const bar = el("div", "filters");
+    const q = field("search", "Search repo name or topic", st.q, 100);
+    const teamSel = selectOf([["", "All teams"], ["unowned", "Unowned"], ...opts.teams.map((t) => [t.id, t.name])], st.team);
+    const srcSel = selectOf([["", "Any assignment"], ["dashboard", "Assigned in dashboard"], ["rule", "By a rule"],
+                             ["config", "By ownership.yml"], ["unowned", "Unowned"]], st.source);
+    const hf = el("label", "muted check"); const hfCb = el("input"); hfCb.type = "checkbox"; hf.append(hfCb, document.createTextNode(" has open findings"));
+    const sortSel = selectOf([["repo", "Sort: name"], ["high", "Sort: most high+"], ["open", "Sort: most open"], ["team", "Sort: team"]], st.sort);
+    const sizeSel = selectOf([["25", "25 / page"], ["50", "50 / page"], ["100", "100 / page"], ["200", "200 / page"]], String(st.size));
+    if (!opts.fixedTeam) bar.append(q, teamSel, srcSel, hf, sortSel, sizeSel); else bar.append(q, srcSel, hf, sortSel, sizeSel);
+    if (opts.admin && !opts.fixedTeam) {
+      bar.append(button("Export CSV", "small", exportCsv), button("Import CSV", "small", () => importDialog()));
+    }
+    const bulk = el("div", "bulkbar"); bulk.hidden = true;
+    const tableBox = el("div", "table-wrap");
+    const pager = el("div", "pager");
+    wrap.append(bar, bulk, tableBox, pager);
+    host.appendChild(wrap);
+
+    const params = () => ({ q: st.q, team: st.team, source: st.source, has_findings: st.has_findings });
+    const reload = async (keepPage) => {
+      if (!keepPage) st.page = 1;
+      tableBox.replaceChildren(el("div", "muted pad", "Loading…"));
+      let d;
+      try { d = await getJSON(`/api/teams/repos?${qs({ ...params(), sort: st.sort, page: st.page, size: st.size })}`); }
+      catch (err) { tableBox.replaceChildren(el("div", "muted pad", err.message)); return; }
+      st.total = d.total;
+      renderTable(d); renderPager(d); renderBulk();
+    };
+    const onFilter = () => { st.selected.clear(); st.allMatching = false; reload(); };
+    q.addEventListener("input", debounce(() => { st.q = q.value.trim(); onFilter(); }, 300));
+    teamSel.addEventListener("change", () => { st.team = teamSel.value; onFilter(); });
+    srcSel.addEventListener("change", () => { st.source = srcSel.value; onFilter(); });
+    hfCb.addEventListener("change", () => { st.has_findings = hfCb.checked; onFilter(); });
+    sortSel.addEventListener("change", () => { st.sort = sortSel.value; reload(); });
+    sizeSel.addEventListener("change", () => { st.size = +sizeSel.value; reload(); });
+
+    function renderTable(d) {
+      const table = el("table", "grid-table");
+      const head = el("tr");
+      const all = el("input"); all.type = "checkbox";
+      all.checked = d.repos.length > 0 && d.repos.every((r) => st.selected.has(r.repo));
+      all.addEventListener("change", () => { d.repos.forEach((r) => all.checked ? st.selected.add(r.repo) : st.selected.delete(r.repo)); st.allMatching = false; renderTable(d); renderBulk(); });
+      const th0 = el("th", "cb"); if (opts.admin) th0.appendChild(all);
+      head.appendChild(th0);
+      ["Repository", "Team", "How", "Open", "High+"].forEach((h, i) => head.appendChild(el("th", i >= 3 ? "num" : null, h)));
+      table.appendChild(head);
+      for (const r of d.repos) {
+        const tr = el("tr");
+        const td0 = el("td", "cb");
+        if (opts.admin) {
+          const cb = el("input"); cb.type = "checkbox"; cb.checked = st.allMatching || st.selected.has(r.repo);
+          cb.addEventListener("change", () => { st.allMatching = false; cb.checked ? st.selected.add(r.repo) : st.selected.delete(r.repo); renderBulk(); all.checked = d.repos.every((x) => st.selected.has(x.repo)); });
+          td0.appendChild(cb);
+        }
+        const name = el("td");
+        name.appendChild(el("div", "repo-name", r.repo));
+        if (r.topics && r.topics.length) { const c = el("div", "chips"); r.topics.slice(0, 4).forEach((t) => c.appendChild(el("span", "topic", t))); name.appendChild(c); }
+        const [lbl, kind] = SOURCE_LABEL(r);
+        const how = el("td"); const ch = chip(lbl, kind); ch.title = r.source; how.appendChild(ch);
+        tr.append(td0, name, el("td", r.team_id ? null : "muted", r.team_name || "—"), how,
+                  el("td", "num", String(r.open)), el("td", `num${r.high ? " bad" : ""}`, String(r.high)));
+        table.appendChild(tr);
+      }
+      if (!d.repos.length) { const tr = el("tr"); const td = el("td", "muted pad", "No repos match these filters."); td.colSpan = 6; tr.appendChild(td); table.appendChild(tr); }
+      tableBox.replaceChildren(table);
+    }
+
+    function renderPager(d) {
+      pager.replaceChildren();
+      const from = d.total ? (d.page - 1) * d.size + 1 : 0;
+      pager.append(el("span", "muted", `${from}–${Math.min(d.page * d.size, d.total)} of ${d.total}`));
+      const prev = button("‹ Prev", "small", () => { st.page -= 1; reload(true); }); prev.disabled = d.page <= 1;
+      const next = button("Next ›", "small", () => { st.page += 1; reload(true); }); next.disabled = d.page >= d.pages;
+      pager.append(prev, el("span", "muted", `page ${d.page} / ${d.pages}`), next);
+    }
+
+    function renderBulk() {
+      const n = st.allMatching ? st.total : st.selected.size;
+      bulk.hidden = !opts.admin || n === 0;
+      if (bulk.hidden) return;
+      bulk.replaceChildren();
+      bulk.append(el("strong", null, `${n} selected`));
+      if (!st.allMatching && st.total > st.selected.size) {
+        bulk.append(button(`Select all ${st.total} matching`, "small link", () => { st.allMatching = true; reloadKeep(); }));
+      }
+      const target = selectOf(opts.teams.filter((t) => !t.archived && t.id !== opts.fixedTeam).map((t) => [t.id, t.name]));
+      const msg = el("span", "muted");
+      const body = () => (st.allMatching ? { filter: params() } : { repos: [...st.selected] });
+      bulk.append(el("span", "muted", "→"), target,
+        button("Assign", "small primary", async () => {
+          const r = await teamWrite("assign", { team_id: target.value, ...body() }, msg);
+          if (r) { msg.textContent = `Assigned ${r.assigned} repos · ${r.findings_moved} findings moved`; st.selected.clear(); st.allMatching = false; setTimeout(() => { loadTeams(); }, 900); }
+        }),
+        button("Remove assignment", "small", async () => {
+          if (!window.confirm(`Remove the explicit assignment of ${n} repos? Their owner is recomputed from rules / ownership.yml on the next weekly run.`)) return;
+          const r = await teamWrite("unpin", body(), msg);
+          if (r) { msg.textContent = `${r.unpinned} assignments removed`; st.selected.clear(); st.allMatching = false; reload(true); }
+        }),
+        button("Clear", "small", () => { st.selected.clear(); st.allMatching = false; reloadKeep(); }), msg);
+    }
+    const reloadKeep = () => reload(true);
+
+    async function exportCsv() {
+      const d = await getJSON("/api/teams/repos/export");
+      const esc = (v) => /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v);
+      const csv = ["repo,team,source,open,high", ...d.repos.map((r) => [r.repo, r.team, r.source, r.open, r.high].map(esc).join(","))].join("\n");
+      const a = el("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+      a.download = `repo-ownership-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    }
+
+    function importDialog() {
+      const dlg = el("dialog", "import-dlg");
+      const ta = el("textarea"); ta.rows = 10; ta.placeholder = "repo,team\nmktp-uk-site,uk_engineering\npay-api,Payments";
+      const file = el("input"); file.type = "file"; file.accept = ".csv,.tsv,.txt";
+      file.addEventListener("change", async () => { if (file.files[0]) ta.value = await file.files[0].text(); });
+      const out = el("div", "muted");
+      const close = () => { dlg.close(); dlg.remove(); };
+      const go = button("Import", "small primary", async () => {
+        const r = await teamWrite("import", { text: ta.value }, out);
+        if (!r) return;
+        out.replaceChildren(el("div", null, r.message || `Applied ${r.applied} rows · ${r.findings_moved || 0} findings moved`));
+        for (const e of r.errors) out.appendChild(el("div", "bad", `line ${e.line}: ${e.error}`));
+        if (r.unknown_repos.length) out.appendChild(el("div", null, `Not seen in GitHub yet (assigned anyway): ${r.unknown_repos.join(", ")}`));
+        reload();
+      });
+      const actions = el("div", "actions"); actions.append(go, button("Close", "small", close));
+      dlg.append(el("h2", null, "Import repo ownership"),
+        el("div", "muted", "One repo per line: repo,team (team id or name). Valid rows are assigned; invalid rows are listed. Nothing is applied if most rows are invalid."),
+        file, ta, actions, out);
+      document.body.appendChild(dlg); dlg.showModal();
+    }
+
+    reload();
   }
   loaders.teams = loadTeams;
+
 
   // ── Start ───────────────────────────────────────────────────────────────
   function setupPersonas() {

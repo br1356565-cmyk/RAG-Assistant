@@ -66,20 +66,25 @@ def test_team_rows_are_visible_to_the_team_only(db):
              "('growth_engineering','a@x.io','member','t'),('uk_engineering','b@x.io','member','t')")
     with db.scoped(GROWTH) as c:
         assert [r["email"] for r in c.execute("select email from team_members").fetchall()] == ["a@x.io"]
-        view = T.overview(c, GROWTH)
-    assert [t["id"] for t in view["teams"]] == ["growth_engineering"] and view["unowned_repos"] == []
+        view = T.summary(c, GROWTH)
+        repos = T.list_repos(c, GROWTH)
+        with pytest.raises(T.TeamError):
+            T.detail(c, GROWTH, "uk_engineering")
+    assert [t["id"] for t in view["teams"]] == ["growth_engineering"] and "unowned" not in view
+    assert [r["repo"] for r in repos["repos"]] == ["mktp-growth-api"]       # only its own repos
     with db.scoped(ADMIN) as c:
-        view = T.overview(c, ADMIN)
+        view = T.summary(c, ADMIN)
+        unowned = T.list_repos(c, ADMIN, team="unowned")
     assert {t["id"] for t in view["teams"]} == {"growth_engineering", "uk_engineering"}
-    assert view["unowned_repos"] == ["orphan-repo"]
+    assert view["unowned"] == 1 and [r["repo"] for r in unowned["repos"]] == ["orphan-repo"]
 
 
 def test_slack_webhook_is_never_returned(db):
     hook = "https://hooks.slack.com/services/T000/B000/XXXXSECRETXXXX"
     with db.scoped(GROWTH_LEAD) as c:
         T.set_settings(c, GROWTH_LEAD, "growth_engineering", {"slack_webhook": hook, "sla_days": {"high": 14}})
-        view = T.overview(c, GROWTH_LEAD)
-    s = view["teams"][0]["settings"]
+        view = T.detail(c, GROWTH_LEAD, "growth_engineering")
+    s = view["settings"]
     assert s["slack"] is True and "SECRET" not in json.dumps(view) and s["sla_days"] == {"critical": 7, "high": 14}
 
 
@@ -179,12 +184,13 @@ def test_api_team_lifecycle(api):
     st, out = api(ADMIN_CLAIMS, "POST", "teams/assign", {"team_id": "payments", "repos": ["orphan-repo"]})
     assert st == 200 and out["findings_moved"] == 1
     assert api(ADMIN_CLAIMS, "POST", "teams/asset", {"team_id": "payments", "kind": "url", "value": "https://pay.example.com"})[0] == 200
-    teams = {t["id"]: t for t in api(ADMIN_CLAIMS, "GET", "teams")[1]["teams"]}
-    assert teams["payments"]["members"][0]["email"] == "p@corp.com"
-    assert {a["value"] for a in teams["payments"]["assets"]} == {"orphan-repo", "https://pay.example.com/"}
+    d = api(ADMIN_CLAIMS, "GET", "teams/detail", {"team_id": "payments"})[1]
+    assert d["members"][0]["email"] == "p@corp.com" and d["urls"][0]["url"] == "https://pay.example.com/"
+    assert d["pinned_repos"] == 1 and d["activity"][0]["action"] == "set_asset"
     # the new lead signs in by e-mail and sees their team
     st, out = api({"oid": "p1", "email": "p@corp.com", "roles": []}, "GET", "teams")
     assert st == 200 and [t["id"] for t in out["teams"]] == ["payments"] and out["teams"][0]["can_manage"]
+    assert out["teams"][0]["repos"] == 1 and out["teams"][0]["members"] == 1
 
 
 def test_api_refuses_non_admin_team_changes(api):
@@ -262,3 +268,90 @@ def test_dast_findings_follow_the_url_owner(iconn):
                                   title="CSP missing", severity="medium", team_hint="uk_engineering")]
     ingest_mod.ingest(iconn, "r1", [store.put("r1", out)], store.load, now=T0)
     assert iconn.execute("select team_id from findings where source = 'dast'").fetchone()["team_id"] == "de"
+
+
+# ── At scale: inventory, bulk, rules, import ───────────────────────────────
+@pytest.fixture()
+def many(db):
+    rows = ",".join(f"('svc-{i:03d}', null, 'no rule matched', '{{\"team-pay\"}}')" if i % 3 == 0 else
+                    f"('svc-{i:03d}', null, 'no rule matched', '{{}}')" for i in range(120))
+    as_owner(f"insert into repo_owners (repo, team_id, source, topics) values {rows}")
+    as_owner("insert into repo_owners (repo, team_id, source) values ('pay-ledger', 'uk_engineering', 'rule: x')")
+    return db
+
+
+def test_repo_inventory_paginates_filters_and_sorts(many):
+    with many.scoped(ADMIN) as c:
+        p1 = T.list_repos(c, ADMIN, team="unowned", size=50)
+        p3 = T.list_repos(c, ADMIN, team="unowned", size=50, page=3)
+        search = T.list_repos(c, ADMIN, q="svc-01")
+        topic = T.list_repos(c, ADMIN, q="team-pay")
+        by_high = T.list_repos(c, ADMIN, sort="high", size=1)
+        cfg = T.list_repos(c, ADMIN, source="config")
+        with pytest.raises(T.TeamError):
+            T.list_repos(c, ADMIN, sort="drop table")
+    assert p1["total"] == 121 and p1["pages"] == 3 and len(p1["repos"]) == 50 and len(p3["repos"]) == 21
+    assert [r["repo"] for r in search["repos"]] == [f"svc-{i:03d}" for i in range(10, 20)]
+    assert topic["total"] == 40                                     # matched by topic, not just name
+    assert by_high["repos"][0]["repo"] == "mktp-growth-api"        # the critical finding sorts first
+    assert {r["repo"] for r in cfg["repos"]} >= {"mktp-growth-api", "pay-ledger"}
+
+
+def test_like_wildcards_are_escaped(many):
+    with many.scoped(ADMIN) as c:
+        assert T.list_repos(c, ADMIN, q="%")["total"] == 0 and T.list_repos(c, ADMIN, q="_")["total"] == 0
+
+
+def test_bulk_assign_by_filter_and_unpin(many):
+    with many.scoped(ADMIN) as c:
+        targets = T.matching_repos(c, ADMIN, q="svc-0")
+        out = T.bulk_assign(c, ADMIN, "growth_engineering", targets)
+    assert out["assigned"] == 100
+    assert owner("select count(*) n from repo_owners where team_id = 'growth_engineering' and source = 'dashboard'")[0]["n"] == 100
+    with many.scoped(ADMIN) as c:
+        assert T.bulk_unpin(c, ADMIN, targets[:10])["unpinned"] == 10
+        assert T.list_repos(c, ADMIN, source="dashboard")["total"] == 90
+    assert owner("select count(*) n from team_changes where action in ('bulk_assign','bulk_unpin')")[0]["n"] == 2
+
+
+def test_rule_preview_and_apply_now_respect_precedence(many):
+    as_owner("insert into team_assets (kind, value, team_id, added_by) values ('repo','svc-003','uk_engineering','a')")
+    as_owner("update repo_owners set team_id = 'uk_engineering', source = 'dashboard' where repo = 'svc-003'")
+    with many.scoped(ADMIN) as c:
+        prev = T.rule_matches(c, "topic", "team-pay")
+        out = T.apply_rule_now(c, ADMIN, "growth_engineering", "topic", "team-pay")
+    assert prev["count"] == 40 and prev["would_change"] == 39       # the explicitly assigned one is kept
+    assert out == {"matched": 40, "changed": 39, "findings_moved": 0}
+    assert owner("select team_id from repo_owners where repo = 'svc-003'")[0]["team_id"] == "uk_engineering"
+    assert owner("select source from repo_owners where repo = 'svc-006'")[0]["source"] == "dashboard rule: topic team-pay"
+    # a later rule never steals repos an earlier dashboard rule already owns
+    with many.scoped(ADMIN) as c:
+        assert T.rule_matches(c, "name_prefix", "svc-00")["would_change"] == 6   # svc-000..009 minus 000,003,006,009
+
+
+def test_import_applies_valid_rows_and_reports_bad_ones(many):
+    text = "repo,team\nsvc-001,growth_engineering\nsvc-002,App Engineering\nsvc-004,nope\nbad name!,de\nnew-repo,uk_engineering"
+    with many.scoped(ADMIN) as c:
+        out = T.import_ownership(c, ADMIN, text)
+    assert out["applied"] == 3 and [e["line"] for e in out["errors"]] == [4, 5] and out["unknown_repos"] == ["new-repo"]
+    assert owner("select team_id from repo_owners where repo = 'svc-002'")[0]["team_id"] == "uk_engineering"  # by name
+    with many.scoped(ADMIN) as c:                                    # mostly garbage: nothing applied
+        assert T.import_ownership(c, ADMIN, "a,x\nb,y\nsvc-007,de")["applied"] == 0
+
+
+def test_bulk_add_members(many):
+    with many.scoped(GROWTH_LEAD) as c:
+        out = T.add_members(c, GROWTH_LEAD, "growth_engineering", "a@corp.com, B@corp.com\nnot-an-email; c@corp.com")
+    assert out == {"added": 3, "invalid": ["not-an-email"]}
+
+
+def test_api_repos_and_bulk_routes(api, many):
+    st, out = api(ADMIN_CLAIMS, "GET", "teams/repos", {"team": "unowned", "size": "10", "page": "2"})
+    assert st == 200 and out["page"] == 2 and len(out["repos"]) == 10
+    st, out = api(ADMIN_CLAIMS, "POST", "teams/assign", {"team_id": "uk_engineering", "filter": {"q": "svc-11"}})
+    assert st == 200 and out["assigned"] == 10
+    assert api(ADMIN_CLAIMS, "GET", "teams/rule-preview", {"kind": "name_prefix", "value": "svc-"})[1]["count"] == 120
+    assert api(GROWTH_CLAIMS, "POST", "teams/assign", {"team_id": "growth_engineering", "repos": ["svc-001"]})[0] == 403
+    assert api(GROWTH_CLAIMS, "POST", "teams/import", {"text": "svc-001,growth_engineering"})[0] == 403
+    assert api(GROWTH_CLAIMS, "GET", "teams/activity")[0] == 403
+    assert len(api(ADMIN_CLAIMS, "GET", "teams/repos/export")[1]["repos"]) == 124

@@ -241,6 +241,18 @@ TEST_PG_HOST=localhost TEST_PG_PORT=5432 pytest -q     # needs Postgres 15+, use
 | Ownership rules (GitHub topic, name prefix, name contains) | security admin | next weekly run, for repos without an explicit assignment |
 | Weekly report: e-mail to members, Slack webhook, Jira project, SLA days | admins; the team's leads | next weekly run |
 
+The page is built for hundreds of repos and dozens of teams:
+
+* **Teams** tab: searchable team list; each team has Members (paste many e-mails at once),
+  Repos, URLs, Ownership rules, Report & Jira, and Activity.
+* **Repositories** tab: every repo with its team, how it got there (assigned / rule /
+  ownership.yml / unowned) and open + high counts; server-side search (name or topic),
+  filters, sort and paging; multi-select across pages or **select all N matching** a filter,
+  then assign to a team or remove the assignment in one action; CSV export and import
+  (`repo,team` lines; valid rows applied, bad rows listed).
+* Rules show a live preview ("matches 21 repos, 9 would move") and can be applied immediately.
+* Every change is in the Activity tab (`team_changes`).
+
 Precedence for "whose repo is this": dashboard assignment > dashboard rule > `ownership.yml`.
 Sign-in finds teams by the token's e-mail/UPN (`team_members`); teams with an `entra_group_id`
 still match the token's `groups` claim, so existing setups keep working. A user is a lead if

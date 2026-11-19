@@ -81,10 +81,11 @@ def ingest(conn, run_id: str, results: list[dict], load: Callable[[str], dict], 
                 repos.append(o["repo"])
                 final = apply_overrides(o["repo"], set(o.get("topics") or []), o, assets, rules)
                 conn.execute(
-                    "insert into repo_owners (repo, team_id, source, confidence, updated_at) values (%s,%s,%s,%s,%s) "
-                    "on conflict (repo) do update set team_id = excluded.team_id, source = excluded.source, "
-                    "confidence = excluded.confidence, updated_at = excluded.updated_at",
-                    (o["repo"], final["team_id"], final["source"], final["confidence"], now))
+                    "insert into repo_owners (repo, team_id, source, confidence, updated_at, topics) "
+                    "values (%s,%s,%s,%s,%s,%s) on conflict (repo) do update set team_id = excluded.team_id, "
+                    "source = excluded.source, confidence = excluded.confidence, updated_at = excluded.updated_at, "
+                    "topics = excluded.topics",
+                    (o["repo"], final["team_id"], final["source"], final["confidence"], now, list(o.get("topics") or [])))
             conn.execute("delete from repo_owners where not (repo = any(%s))", (repos,))
             warnings += own.get("warnings") or []
         else:

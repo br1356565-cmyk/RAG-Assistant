@@ -226,22 +226,59 @@
       .user { max-width:88%; }
       nav .kbd { display:none; }
     }
-    /* Teams */
-    .team-grid { display:grid; gap:14px; }
+    /* Teams (built for hundreds of repos) */
+    .subtabs { display:flex; flex-wrap:wrap; gap:4px; margin:0 0 12px; border-bottom:1px solid var(--line); }
+    .subtabs.small { margin-top:14px; }
+    button.subtab { background:transparent; color:var(--muted); border:0; border-bottom:2px solid transparent; border-radius:0; padding:8px 12px; font-weight:600; font-size:13px; }
+    button.subtab.active { color:var(--accent); border-bottom-color:var(--accent); }
+    button.subtab.warn { color:var(--crit); margin-left:auto; }
+    .master { display:grid; grid-template-columns:minmax(220px, 280px) 1fr; gap:14px; align-items:start; }
+    @media (max-width: 900px) { .master { grid-template-columns:1fr; } }
+    .team-list { padding:10px; position:sticky; top:12px; max-height:calc(100vh - 140px); overflow:auto; }
+    .team-list input[type=search] { width:100%; padding:7px 10px; margin-bottom:6px; }
+    .team-row { display:block; width:100%; text-align:left; background:transparent; color:var(--ink); border:0; border-radius:8px; padding:8px 10px; margin:2px 0; font-weight:400; }
+    .team-row:hover { background:var(--bg); }
+    .team-row.active { background:var(--info-bg); }
+    .team-row.archived { opacity:.55; }
+    .team-row-top { display:flex; justify-content:space-between; gap:6px; align-items:center; }
+    .team-row-name { font-weight:600; font-size:14px; }
+    .pill { font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px; }
+    .pill.bad { color:var(--crit); background:var(--crit-bg); }
     .team-head { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
-    .team-head h2 { margin:0; font-size:17px; }
-    .team-cols { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:14px 22px; margin-top:12px; }
-    .team-cols h3 { margin:0 0 6px; font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
-    .row-list { list-style:none; margin:0; padding:0; }
-    .row-list li { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:5px 0; border-top:1px solid var(--line); font-size:13px; word-break:break-all; }
+    .team-head h2 { margin:0; font-size:18px; }
+    .stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(92px, 1fr)); gap:8px; margin-top:12px; }
+    .stat { border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+    .stat-n { font-size:20px; font-weight:700; }
+    .stat.bad .stat-n { color:var(--crit); }
+    .pane { padding-top:6px; }
+    .grid-table { width:100%; border-collapse:collapse; font-size:13px; }
+    .grid-table th { text-align:left; font-size:12px; color:var(--muted); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--panel); z-index:1; }
+    .grid-table td { padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+    .grid-table tr:hover td { background:var(--bg); }
+    .grid-table .num { text-align:right; font-variant-numeric:tabular-nums; width:60px; }
+    .grid-table .cb { width:28px; }
+    .grid-table .right { text-align:right; white-space:nowrap; }
+    .grid-table td.bad, .bad { color:var(--crit); font-weight:600; }
+    .table-wrap { max-height:60vh; overflow:auto; border:1px solid var(--line); border-radius:8px; margin-top:8px; }
+    .repo-name { font:13px var(--mono); word-break:break-all; }
+    .chips { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+    .topic { font-size:11px; color:var(--info); background:var(--info-bg); border-radius:4px; padding:0 5px; }
+    .filters .check { display:flex; align-items:center; gap:4px; white-space:nowrap; }
+    .bulkbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; padding:8px 10px; border-radius:8px; background:var(--info-bg); position:sticky; top:0; z-index:2; }
+    button.link { background:transparent; color:var(--accent); padding:4px 6px; text-decoration:underline; }
+    .pad { padding:12px; }
+    .row-list { list-style:none; margin:8px 0; padding:0; }
+    .row-list li { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:6px 0; border-top:1px solid var(--line); font-size:13px; word-break:break-all; }
     .row-list li:first-child { border-top:0; }
-    .row-list li > span { min-width:0; }
+    .row-list li > span:first-child { flex:1; min-width:0; }
     .row-list li > button { flex-shrink:0; white-space:nowrap; }
-    .settings-grid { display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center; font-size:13px; }
+    .bulk-add { margin-top:14px; }
+    .bulk-add textarea, .import-dlg textarea { width:100%; padding:8px 10px; resize:vertical; font:13px var(--mono); margin-top:6px; }
+    .preview { margin-top:8px; }
+    .settings-grid { display:grid; grid-template-columns:auto minmax(0, 360px); gap:8px 14px; align-items:center; font-size:13px; margin:6px 0 10px; }
     .settings-grid input[type=text], .settings-grid input[type=url], .settings-grid input[type=email] { padding:6px 9px; min-width:0; }
-    .settings-grid input[type=number] { width:80px; padding:6px 8px; }
-    .unowned { max-height:260px; overflow:auto; columns:2 220px; font-size:13px; }
-    .unowned label { display:block; break-inside:avoid; padding:2px 0; }
+    .settings-grid input[type=number] { width:90px; padding:6px 8px; }
+    .import-dlg { width:min(640px, 92vw); border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); color:var(--ink); }
   </style>
 </head>
 <body>
@@ -332,7 +369,7 @@
         </section>
 
         <section class="view" id="view-teams" data-title="Teams" hidden>
-          <div class="view-head"><div><h1>Teams</h1><div class="sub">Who is in each team, which repos and URLs it owns, and where its weekly report goes. Changes apply immediately: findings move with a repo the moment it is reassigned.</div></div></div>
+          <div class="view-head"><div><h1>Teams</h1><div class="sub">Who is in each team, which repos and URLs it owns, and where its weekly report goes. Assignments apply immediately: a repo&#39;s findings move with it.</div></div></div>
           <div id="teams"><div class="muted">Loading…</div></div>
         </section>
 

@@ -749,3 +749,9 @@ grant select, insert on team_changes to audit_app;
 grant select, insert, update, delete on team_members, team_assets, team_rules, team_settings, jira_tickets,
   team_changes to audit_ingest;
 grant usage on all sequences in schema public to audit_app, audit_ingest;
+
+-- Repo inventory at scale: topics are kept so a dashboard rule can be previewed before it is
+-- saved ("which repos would this match?"); team filter and search stay fast for thousands of repos.
+alter table repo_owners add column if not exists topics text[] not null default '{}';
+create index if not exists repo_owners_team on repo_owners (team_id, repo);
+create index if not exists team_changes_team on team_changes (team_id, at desc);
