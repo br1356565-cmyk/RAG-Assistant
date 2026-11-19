@@ -568,7 +568,7 @@ variable "litellm_cpu" {
 
 variable "litellm_memory" {
   type    = number
-  default = 1024
+  default = 2048
 }
 
 variable "litellm_cpu_architecture" {
