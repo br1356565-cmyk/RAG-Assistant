@@ -349,6 +349,7 @@ resource "aws_ecs_task_definition" "litellm" {
       { name = "AWS_REGION", value = var.aws_region },
       { name = "AWS_DEFAULT_REGION", value = var.aws_region },
       { name = "LITELLM_LOG", value = "INFO" },
+      { name = "PYTHONUNBUFFERED", value = "1" }, # flush startup output so a crash still leaves logs
       { name = "DISABLE_ADMIN_UI", value = "True" },
       { name = "STORE_MODEL_IN_DB", value = "False" },
     ]
