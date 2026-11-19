@@ -305,6 +305,11 @@ resource "aws_iam_role_policy" "litellm_task" {
     { Effect = "Allow", Action = ["bedrock:ApplyGuardrail"], Resource = [
       aws_bedrock_guardrail.pii[0].guardrail_arn, aws_bedrock_guardrail.policy[0].guardrail_arn,
     ] },
+    # ECS Exec (the SSM agent in the task opens its channel through these)
+    { Effect = "Allow", Action = [
+      "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel",
+    ], Resource = "*" },
   ] })
 }
 
@@ -344,6 +349,15 @@ resource "aws_ecs_task_definition" "litellm" {
     entryPoint   = ["/bin/sh", "-c"]
     command      = ["printf '%s' \"$LITELLM_CONFIG_YAML\" > /tmp/litellm.yaml && exec litellm --config /tmp/litellm.yaml --port 4000 --num_workers 1"]
     portMappings = [{ containerPort = 4000, protocol = "tcp" }]
+    # /health/liveliness needs no key. Python is always in the image (curl/wget may not be).
+    # startPeriod covers LiteLLM's database migration on boot; failures in it don't count.
+    healthCheck = {
+      command     = ["CMD-SHELL", "$(command -v python3 || command -v python) -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=4)\" || exit 1"]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 180
+    }
     environment = [
       { name = "LITELLM_CONFIG_YAML", value = local.litellm_config },
       { name = "AWS_REGION", value = var.aws_region },
@@ -380,6 +394,17 @@ resource "aws_ecs_service" "litellm" {
   # one task; a new revision starts before the old one stops
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
+
+  # A revision whose tasks keep failing (e.g. the OOM crash loop) is rolled back to the last
+  # working one, and Terraform fails in minutes instead of hanging until the llm_keys timeout.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  # There is no load balancer or public path, so this is the way in for debugging:
+  #   aws ecs execute-command --cluster <name>-llm --task <id> --container litellm --interactive --command sh
+  enable_execute_command = true
 
   network_configuration {
     subnets          = local.private_subnet_ids
