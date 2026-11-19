@@ -1,4 +1,4 @@
-# Seven functions from one code package (plus the Gateway tools Lambda in agentcore.tf). Every deploy publishes a version and moves the
+# Nine functions from one code package (plus the Gateway tools Lambda in agentcore.tf). Every deploy publishes a version and moves the
 # `live` alias; Step Functions, the function URL and Terraform's migration call all use the
 # alias, so rolling back is: aws lambda update-alias --name live --function-version <previous>.
 
@@ -100,6 +100,34 @@ locals {
         SECURITYHUB_SKIP_PRODUCTS = contains(var.collectors, "guardduty") ? "GuardDuty" : ""
         GITHUB_MAX_RATE_WAIT_S    = "300" # batch job with a 900 s timeout can afford to wait
       }))
+    }
+    # First step of the weekly run: exports dashboard-registered DAST targets to S3.
+    prepare = {
+      handler  = "audit_agent.handlers.prepare.handler"
+      timeout  = 60
+      memory   = 256
+      in_vpc   = true
+      reserved = -1
+      env = tomap(merge(local.db_env, {
+        DB_USER     = local.ingest_db_user
+        DATA_BUCKET = aws_s3_bucket.data.bucket
+      }))
+    }
+    # After review: Jira sync, then each team's e-mail / Slack report (dashboard settings).
+    # The dashboard link comes in the Step Functions payload (CloudFront depends on the Lambdas).
+    deliver = {
+      handler  = "audit_agent.handlers.deliver.handler"
+      timeout  = 600
+      memory   = 512
+      in_vpc   = true
+      reserved = -1
+      env = tomap(merge(local.db_env, {
+        DB_USER         = local.ingest_db_user
+        JIRA_MAX_CREATE = tostring(var.jira_max_create)
+        }, { for k, v in {
+          DIGEST_SENDER = var.digest_sender
+          JIRA_SECRET   = var.jira_enabled ? aws_secretsmanager_secret.jira[0].arn : null
+      } : k => v if v != null }))
     }
     notify = {
       handler  = "audit_agent.handlers.notify.handler"

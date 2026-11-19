@@ -71,6 +71,8 @@ locals {
     ]
     collect = [
       { actions = ["s3:PutObject"], resources = ["${aws_s3_bucket.data.arn}/runs/*"] },
+      # the sast / dast collectors read what the scan tasks wrote
+      { actions = ["s3:GetObject"], resources = ["${aws_s3_bucket.data.arn}/runs/*"] },
       { actions = ["secretsmanager:GetSecretValue"], resources = [aws_secretsmanager_secret.github_private_key.arn] },
       { actions = ["sts:AssumeRole"], resources = var.security_audit_role_arn == null ? [] : [var.security_audit_role_arn] },
       # used only when no security_audit_role_arn is set (GuardDuty read in this account)
@@ -79,6 +81,16 @@ locals {
     ]
     notify = [
       { actions = ["secretsmanager:GetSecretValue"], resources = [aws_secretsmanager_secret.slack_webhook.arn] },
+    ]
+    prepare = [
+      { actions = ["rds-db:connect"], resources = ["${local.db_user_arn}/${local.ingest_db_user}"] },
+      { actions = ["s3:PutObject"], resources = ["${aws_s3_bucket.data.arn}/config/*"] },
+    ]
+    deliver = [
+      { actions = ["rds-db:connect"], resources = ["${local.db_user_arn}/${local.ingest_db_user}"] },
+      { actions = ["ses:SendEmail"], resources = var.digest_sender == null ? [] : [
+      "arn:${local.partition}:ses:${var.aws_region}:${local.account_id}:identity/*"] },
+      { actions = ["secretsmanager:GetSecretValue"], resources = var.jira_enabled ? [aws_secretsmanager_secret.jira[0].arn] : [] },
     ]
     review_gate = [
       { actions = ["rds-db:connect"], resources = ["${local.db_user_arn}/${local.ingest_db_user}"] },

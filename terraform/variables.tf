@@ -598,3 +598,75 @@ variable "litellm_key_rpm" {
   type    = number
   default = 60
 }
+
+# ── Org-wide SAST / DAST, team reports and Jira (scanning.tf, deliver step) ───────────────
+variable "sast_enabled" {
+  type        = bool
+  default     = false
+  description = "Weekly Semgrep scan of every repo the GitHub App can read (Fargate task, official semgrep image). The App needs Contents: read."
+}
+
+variable "dast_enabled" {
+  type        = bool
+  default     = false
+  description = "Weekly OWASP ZAP baseline (passive) scan of the URLs teams register in the dashboard (Fargate task, official ZAP image)."
+}
+
+variable "semgrep_config" {
+  type        = string
+  default     = "p/default"
+  description = "Semgrep rule set: a registry config such as p/default, p/owasp-top-ten, p/secrets (comma-free; one config)."
+}
+
+variable "semgrep_image" {
+  type        = string
+  default     = "semgrep/semgrep:1.170.0"
+  description = "Pin a version tag."
+}
+
+variable "zap_image" {
+  type        = string
+  default     = "ghcr.io/zaproxy/zaproxy:stable"
+  description = "Pin a version tag (e.g. ghcr.io/zaproxy/zaproxy:2.16.1) for repeatable results."
+}
+
+variable "sast_concurrency" {
+  type        = number
+  default     = 4
+  description = "Repos scanned in parallel inside the SAST task (4 vCPU / 8 GB by default)."
+}
+
+variable "sast_max_repos" {
+  type        = number
+  default     = 0
+  description = "0 = every repo. Set a small number for a first trial run."
+}
+
+variable "dast_max_targets" {
+  type    = number
+  default = 50
+}
+
+variable "digest_sender" {
+  type        = string
+  default     = null
+  description = "From address for the weekly team e-mails (an SES identity in this region). Null = no e-mails. New SES accounts are in the sandbox: recipients must be verified until you request production access."
+}
+
+variable "dashboard_url" {
+  type        = string
+  default     = null
+  description = "Link used in reports and Jira tickets. Null = the stack's CloudFront URL."
+}
+
+variable "jira_enabled" {
+  type        = bool
+  default     = false
+  description = "Create the Jira credentials secret and let teams turn on tickets in the dashboard. Put {\"base_url\":\"https://<site>.atlassian.net\",\"email\":\"...\",\"api_token\":\"...\"} in the secret."
+}
+
+variable "jira_max_create" {
+  type        = number
+  default     = 50
+  description = "New Jira tickets per weekly run across all teams; the rest wait for the next run (no flood on day one)."
+}

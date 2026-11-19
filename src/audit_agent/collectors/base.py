@@ -46,10 +46,14 @@ class CollectorOutput:
     owners: list[dict] | None = None   # ownership collector only
     teams: list[dict] | None = None    # ownership collector only
     warnings: list[str] = field(default_factory=list)
+    # With complete=True: if set, only findings on these resources can be marked fixed (a scan
+    # that covered 380 of 400 repos closes nothing in the 20 it could not scan).
+    scope_resources: list[str] | None = None
 
     def to_json(self) -> dict:
         seen: dict[str, dict] = {}
         for f in self.findings:            # last record wins if a source repeats a fingerprint
             seen[f.fingerprint] = f.to_json()
         return {"collector": self.collector, "complete": self.complete, "findings": list(seen.values()),
-                "owners": self.owners, "teams": self.teams, "warnings": self.warnings}
+                "owners": self.owners, "teams": self.teams, "warnings": self.warnings,
+                "scope_resources": self.scope_resources}

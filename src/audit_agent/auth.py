@@ -4,10 +4,12 @@ App roles (defined on the Entra app registration):
   security.admin -> sees every team, admin-only findings and unowned repos
   team.lead      -> own teams; can later approve notes in the UI
   (none)         -> team member
-Team membership comes from the token's `groups` claim. In the company tenant, configure it
-as "groups assigned to the application" so it never overflows (assigning groups to an app
-needs Entra ID P1). A free demo tenant uses "Security groups"; overage (200+ groups) is
-rejected with a clear 403 either way.
+Team membership is managed in the dashboard (team_members, by the token's e-mail/UPN), so
+adding someone to a team needs no Entra change and no deploy. The token's `groups` claim
+still counts for teams that have an entra_group_id (the legacy mapping). A user is a team
+lead if they have the Entra team.lead role, or are a lead in every team they belong to
+(a lead of one team who is a plain member of another gets member rights, never more).
+Group overage (200+ groups) is rejected with a clear 403.
 """
 from __future__ import annotations
 
@@ -57,6 +59,8 @@ def bearer_token(headers: dict) -> str:
 
 
 def resolve_scope(claims: dict, db: Database) -> Scope:
+    from .teams import email_from_claims, memberships
+
     if "_claim_names" in claims and "groups" in claims.get("_claim_names", {}):
         raise AuthError(
             "group overage: configure the app registration to emit only groups assigned to the application",
@@ -67,18 +71,16 @@ def resolve_scope(claims: dict, db: Database) -> Scope:
     user_id = claims["oid"]
 
     with db.scoped(Scope(user_id=user_id, team_ids=(), role="none")) as conn:
-        rows = conn.execute(
-            "select id, name from teams where entra_group_id = any(%s) order by id", (groups,)
-        ).fetchall()
-    team_ids = tuple(r["id"] for r in rows)
-    names = {r["id"]: r["name"] for r in rows}
+        m = memberships(conn, email_from_claims(claims), groups)
+    team_ids = m.team_ids
 
     if "security.admin" in roles:
         role = "security_admin"
     elif not team_ids:
-        raise AuthError("you are not in any team that uses the audit agent", status=403)
-    elif "team.lead" in roles:
+        raise AuthError("you are not in any team that uses the audit agent; ask a security admin to add you",
+                        status=403)
+    elif "team.lead" in roles or (m.lead_of and m.lead_of == frozenset(team_ids)):
         role = "team_lead"
     else:
         role = "team_member"
-    return Scope(user_id=user_id, team_ids=team_ids, role=role, team_names=names)
+    return Scope(user_id=user_id, team_ids=team_ids, role=role, team_names=m.names)

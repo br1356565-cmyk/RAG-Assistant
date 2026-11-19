@@ -41,6 +41,15 @@ def format_message(event: dict) -> str:
         lines.append(":hourglass: Some low-confidence investigations were not reviewed within the time limit.")
     elif rv.get("reviewed"):
         lines.append("All low-confidence investigations from this run were reviewed by a team lead.")
+    dl = event.get("delivery") or {}
+    dg, jr = dl.get("digest") or {}, dl.get("jira") or {}
+    if dg.get("teams") or dg.get("errors"):
+        lines.append(f"Team reports: {dg.get('teams', 0)} teams, {dg.get('emails', 0)} e-mails, "
+                     f"{dg.get('slack', 0)} Slack posts" + (f", {len(dg['errors'])} errors" if dg.get("errors") else ""))
+    if jr.get("created") or jr.get("closed") or jr.get("followups") or jr.get("errors"):
+        lines.append(f"Jira: {jr.get('created', 0)} created, {jr.get('closed', 0)} closed, "
+                     f"{jr.get('followups', 0)} follow-ups" + (f", {jr['deferred']} deferred" if jr.get("deferred") else "")
+                     + (f", {len(jr['errors'])} errors" if jr.get("errors") else ""))
     for w in (ing.get("warnings") or [])[:5]:
         lines.append(f"• {w}")
     return "\n".join(lines)

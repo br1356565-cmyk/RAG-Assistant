@@ -20,3 +20,11 @@ github_installation_id = "78901234"
 security_audit_role_arn = "arn:aws:iam::222222222222:role/devops-audit-guardduty-read" # or null
 
 alarm_email = "platform-devops@example.com"
+
+# ── Org-wide SAST / DAST and team reports (README: "Teams, org-wide scanning and team reports")
+# sast_enabled     = true            # Semgrep over every repo the GitHub App reads (needs Contents: read)
+# sast_max_repos   = 20              # trial run on a few repos first; 0 = all
+# dast_enabled     = true            # ZAP baseline over URLs teams register on the Teams page
+# digest_sender    = "devops-audit@example.com"   # SES identity; weekly e-mail to each team's members
+# jira_enabled     = true            # then put {"base_url","email","api_token"} in the jira secret
+# jira_max_create  = 50

@@ -226,6 +226,22 @@
       .user { max-width:88%; }
       nav .kbd { display:none; }
     }
+    /* Teams */
+    .team-grid { display:grid; gap:14px; }
+    .team-head { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
+    .team-head h2 { margin:0; font-size:17px; }
+    .team-cols { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:14px 22px; margin-top:12px; }
+    .team-cols h3 { margin:0 0 6px; font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+    .row-list { list-style:none; margin:0; padding:0; }
+    .row-list li { display:flex; gap:8px; align-items:center; justify-content:space-between; padding:5px 0; border-top:1px solid var(--line); font-size:13px; word-break:break-all; }
+    .row-list li:first-child { border-top:0; }
+    .row-list li > span { min-width:0; }
+    .row-list li > button { flex-shrink:0; white-space:nowrap; }
+    .settings-grid { display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center; font-size:13px; }
+    .settings-grid input[type=text], .settings-grid input[type=url], .settings-grid input[type=email] { padding:6px 9px; min-width:0; }
+    .settings-grid input[type=number] { width:80px; padding:6px 8px; }
+    .unowned { max-height:260px; overflow:auto; columns:2 220px; font-size:13px; }
+    .unowned label { display:block; break-inside:avoid; padding:2px 0; }
   </style>
 </head>
 <body>
@@ -238,6 +254,7 @@
         <a href="#chat" data-view="chat"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12z"/></svg>Chat<span class="kbd">g c</span></a>
         <a href="#infra" data-view="infra" data-admin hidden><svg viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>Infra requests<span class="kbd">g i</span></a>
         <a href="#review" data-view="review"><svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg>Review<span class="badge" id="review-count" hidden></span></a>
+        <a href="#teams" data-view="teams"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M15.5 14.2c3 .2 5.5 2.6 5.5 5.8"/></svg>Teams<span class="kbd">g t</span></a>
         <a href="#conventions" data-view="conventions" data-admin hidden><svg viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z"/><path d="M9 10h6M9 14h6M9 18h4"/></svg>Conventions<span class="kbd">g n</span></a>
       </nav>
       <div class="side-foot">
@@ -314,6 +331,11 @@
           <div id="review"><div class="muted">Loading…</div></div>
         </section>
 
+        <section class="view" id="view-teams" data-title="Teams" hidden>
+          <div class="view-head"><div><h1>Teams</h1><div class="sub">Who is in each team, which repos and URLs it owns, and where its weekly report goes. Changes apply immediately: findings move with a repo the moment it is reassigned.</div></div></div>
+          <div id="teams"><div class="muted">Loading…</div></div>
+        </section>
+
         <section class="view" id="view-conventions" data-title="Conventions" hidden>
           <div class="view-head"><div><h1>Conventions</h1><div class="sub">The Terraform drafter's long-term memory. Rejection reasons arrive here as proposals; an admin approves them before the drafter uses them.</div></div></div>
           <div id="conventions"><div class="muted">Loading…</div></div>
@@ -331,6 +353,7 @@
       <kbd>g c</kbd><span>Chat</span>
       <kbd>g i</kbd><span>Infra requests</span>
       <kbd>g r</kbd><span>Review</span>
+      <kbd>g t</kbd><span>Teams</span>
       <kbd>g n</kbd><span>Conventions</span>
       <kbd>t</kbd><span>Switch theme</span>
       <kbd>?</kbd><span>This help</span>

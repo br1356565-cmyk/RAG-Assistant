@@ -91,7 +91,9 @@ def collect(github, cfg: dict | None = None) -> CollectorOutput:
         if team and team not in known:
             out.warnings.append(f"{name}: assigned to unknown team '{team}' ({source})")
             source, team, confidence = f"{source} -> unknown team {team}", None, "unknown"
-        out.owners.append({"repo": name, "team_id": team, "source": source, "confidence": confidence})
+        out.owners.append({"repo": name, "team_id": team, "source": source, "confidence": confidence,
+                           # ingest re-applies dashboard rules (team_rules) to these
+                           "topics": sorted({t.lower() for t in repo.get("topics") or []})})
         if team is None:
             out.findings.append(FindingRecord(
                 source="ownership", resource=name, rule="no_owner", severity="low",

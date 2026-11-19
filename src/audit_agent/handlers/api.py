@@ -449,3 +449,7 @@ ROUTES = {
     ("POST", "conventions/decide"): convention_decide,
 }
 
+from .teams_api import ROUTES as _TEAM_ROUTES  # noqa: E402  (dashboard team management)
+
+ROUTES.update(_TEAM_ROUTES)
+

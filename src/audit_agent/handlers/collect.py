@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ..collectors import dependabot, guardduty, ownership, securityhub
+from ..collectors import dast, dependabot, guardduty, ownership, sast, securityhub
 from ..collectors.base import CollectorOutput
 from ..config import Settings, load_secret
 from ..github import GitHubApp
@@ -55,7 +55,12 @@ def _build() -> CollectDeps:
     return CollectDeps(github=gh, s3=boto3.client("s3"), bucket=os.environ["DATA_BUCKET"], aws_session=aws_session)
 
 
-def run(name: str, d: CollectDeps) -> CollectorOutput:
+def run(name: str, d: CollectDeps, run_id: str = "") -> CollectorOutput:
+    # SAST/DAST: the weekly scan tasks wrote raw results under runs/<run_id>/; turn them into findings.
+    if name == "sast":
+        return sast.collect(d.s3, d.bucket, run_id)
+    if name == "dast":
+        return dast.collect(d.s3, d.bucket, run_id)
     if name == "ownership":
         return ownership.collect(d.github)
     if name == "dependabot":
@@ -78,7 +83,7 @@ def handler(event: dict, context) -> dict:
     global _deps
     d = _deps or (_deps := _build())
     name, run_id = str(event["collector"]), str(event["run_id"])
-    out = run(name, d)
+    out = run(name, d, run_id)
     key = f"runs/{run_id}/{name}.json"
     d.s3.put_object(Bucket=d.bucket, Key=key, Body=json.dumps(out.to_json(), default=str).encode(),
                     ContentType="application/json")

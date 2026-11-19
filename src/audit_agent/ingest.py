@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from .prompts import PROMPT_VERSION
+from .teams import apply_overrides, dast_targets, load_overrides
 
 SEV_RANK = "array_position(array['critical','high','medium','low','info'], f.severity)"
 
@@ -64,23 +65,34 @@ def ingest(conn, run_id: str, results: list[dict], load: Callable[[str], dict], 
             if status == "succeeded":
                 outputs[name] = load(r["key"])
 
-        # 1. Ownership first, so this run's findings get today's owners.
+        # 1. Ownership first, so this run's findings get today's owners. Teams edited in the
+        #    dashboard (source = 'dashboard') are left alone; YAML only seeds 'config' teams.
+        #    Precedence per repo: dashboard assignment > dashboard rule > ownership.yml.
+        assets, rules = load_overrides(conn)
         own = outputs.get("ownership")
         if own:
             for t in own.get("teams") or []:
                 conn.execute("insert into teams (id, name, entra_group_id) values (%s, %s, %s) on conflict (id) "
-                             "do update set name = excluded.name, entra_group_id = excluded.entra_group_id",
+                             "do update set name = excluded.name, entra_group_id = excluded.entra_group_id "
+                             "where teams.source = 'config'",
                              (t["id"], t["name"], t.get("entra_group_id")))
             repos = []
             for o in own.get("owners") or []:
                 repos.append(o["repo"])
+                final = apply_overrides(o["repo"], set(o.get("topics") or []), o, assets, rules)
                 conn.execute(
                     "insert into repo_owners (repo, team_id, source, confidence, updated_at) values (%s,%s,%s,%s,%s) "
                     "on conflict (repo) do update set team_id = excluded.team_id, source = excluded.source, "
                     "confidence = excluded.confidence, updated_at = excluded.updated_at",
-                    (o["repo"], o["team_id"], o["source"], o["confidence"], now))
+                    (o["repo"], final["team_id"], final["source"], final["confidence"], now))
             conn.execute("delete from repo_owners where not (repo = any(%s))", (repos,))
             warnings += own.get("warnings") or []
+        else:
+            # No ownership output this run: dashboard assignments still apply to known repos.
+            for repo, team in assets.items():
+                conn.execute("update repo_owners set team_id = %s, source = 'dashboard', confidence = 'confirmed', "
+                             "updated_at = %s where repo = %s and team_id is distinct from %s", (team, now, repo, team))
+        url_owner = {u["url"]: u["team_id"] for u in dast_targets(conn)}
 
         teams = {r["id"] for r in conn.execute("select id from teams").fetchall()}
         owners = {r["repo"]: r["team_id"] for r in conn.execute("select repo, team_id from repo_owners").fetchall()}
@@ -88,7 +100,7 @@ def ingest(conn, run_id: str, results: list[dict], load: Callable[[str], dict], 
         # 2. Findings, per collector.
         for name, out in outputs.items():
             existing = {r["fingerprint"]: r for r in conn.execute(
-                "select fingerprint, status, severity, title, details, team_id from findings where source = %s",
+                "select fingerprint, status, severity, title, details, team_id, resource from findings where source = %s",
                 (name,)).fetchall()}
             seen: set[str] = set()
             for f in out.get("findings") or []:
@@ -97,7 +109,10 @@ def ingest(conn, run_id: str, results: list[dict], load: Callable[[str], dict], 
                     continue
                 fp = f["fingerprint"]
                 seen.add(fp)
-                team = f.get("team_hint") or (None if name == "ownership" else owners.get(f["resource"]))
+                if name == "dast":
+                    team = url_owner.get(f["resource"]) or f.get("team_hint")
+                else:
+                    team = f.get("team_hint") or (None if name == "ownership" else owners.get(f["resource"]))
                 team = team if team in teams else None
                 ex = existing.get(fp)
                 if ex is None:
@@ -128,7 +143,9 @@ def ingest(conn, run_id: str, results: list[dict], load: Callable[[str], dict], 
                     changed.add(fp)
 
             if out.get("complete"):
-                gone = [fp for fp, r in existing.items() if r["status"] == "open" and fp not in seen]
+                in_scope = set(out["scope_resources"]) if out.get("scope_resources") is not None else None
+                gone = [fp for fp, r in existing.items() if r["status"] == "open" and fp not in seen
+                        and (in_scope is None or r["resource"] in in_scope)]
                 if gone:
                     conn.execute("update findings set status = 'fixed' where fingerprint = any(%s)", (gone,))
                     for fp in gone:

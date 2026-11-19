@@ -228,6 +228,54 @@ pip install -r requirements-runtime.txt pytest
 TEST_PG_HOST=localhost TEST_PG_PORT=5432 pytest -q     # needs Postgres 15+, user postgres
 ```
 
+## Teams, org-wide scanning and team reports
+
+**Teams are managed in the dashboard** (Teams page), not in YAML or Terraform:
+
+| What | Who | Effect |
+|---|---|---|
+| Create, rename, archive a team | security admin | immediate |
+| Add/remove members by e-mail, make leads | admins; leads add/remove members of their own team | the person's next sign-in |
+| Assign a repo or URL to a team | security admin | immediate: its open findings move with it |
+| Bulk-assign unowned repos | security admin | immediate |
+| Ownership rules (GitHub topic, name prefix, name contains) | security admin | next weekly run, for repos without an explicit assignment |
+| Weekly report: e-mail to members, Slack webhook, Jira project, SLA days | admins; the team's leads | next weekly run |
+
+Precedence for "whose repo is this": dashboard assignment > dashboard rule > `ownership.yml`.
+Sign-in finds teams by the token's e-mail/UPN (`team_members`); teams with an `entra_group_id`
+still match the token's `groups` claim, so existing setups keep working. A user is a lead if
+they have the Entra `team.lead` role or are a lead in every team they belong to. Teams from
+`ownership.yml` are seeded as `source = config`; once edited in the dashboard they become
+`source = dashboard` and the YAML no longer changes them. Every change is in `team_changes`.
+
+**Org-wide scanning** (`scanning.tf`, off by default):
+
+* `sast_enabled = true`: a weekly Fargate task in the official `semgrep/semgrep` image clones
+  every repo the GitHub App can read (needs *Contents: read*) and runs `semgrep_config`
+  (default `p/default`). Findings are `source = sast`, one per rule per code location; the
+  identity is a hash of the matched lines, so moving code doesn't reopen anything. No code is
+  stored. Repos that failed to clone close nothing (`scope_resources`).
+* `dast_enabled = true`: a weekly Fargate task in the official ZAP image runs a **baseline
+  (passive)** scan of each URL a team registered on the Teams page. No attack payloads; safe
+  against production. Findings are `source = dast` and belong to the URL's team.
+* Both run in parallel before the collectors; a failed scan never fails the run.
+
+**Team reports and Jira** (the `Deliver` step, after review):
+
+* `digest_sender = "audit@yourdomain"`: each team's members get an e-mail (Amazon SES) with
+  open counts, what changed this week, what is past SLA, and what to fix first; teams with a
+  Slack webhook get the same in their channel. New SES accounts are in the sandbox: verify
+  recipients or request production access.
+* `jira_enabled = true` + the `jira` secret: teams that turn on Jira get one ticket per
+  repo + rule (high and critical only), assigned to the team's chosen assignee, closed
+  automatically when the scan no longer finds it, and a weekly reminder comment mentioning the
+  assignee and leads once it is past the team's SLA. At most `jira_max_create` new tickets per
+  run, so a first run on a large org doesn't flood the project.
+
+Known gaps: dashboard-created teams use the `default` LiteLLM key (their model cost isn't split
+out until the key bootstrap reads teams from the database); a person who leads one team and is
+a plain member of another gets member rights everywhere.
+
 ## Not built yet
 
 - Remaining collectors (table above); keep the old cron for them

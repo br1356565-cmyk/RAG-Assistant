@@ -216,7 +216,7 @@
     const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
     if (e.key === "Escape") { document.body.classList.remove("nav-open"); if (typing) e.target.blur(); return; }
     if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
-    const go = { b: "brief", f: "findings", c: "chat", i: "infra", r: "review", n: "conventions" };
+    const go = { b: "brief", f: "findings", c: "chat", i: "infra", r: "review", n: "conventions", t: "teams" };
     if (pendingG && Date.now() - pendingG < 1200 && go[e.key]) { location.hash = go[e.key]; pendingG = 0; e.preventDefault(); return; }
     pendingG = 0;
     if (e.key === "g") { pendingG = Date.now(); return; }
@@ -951,6 +951,202 @@
     }
   }
   loaders.conventions = loadConventions;
+
+  // ── Teams (dashboard-managed membership, ownership and delivery) ─────────
+  async function teamPost(path, body, status) {
+    try { await postJSON(`/api/teams/${path}`, body); await loadTeams(); }
+    catch (err) { if (status) status.textContent = err.message; else alert(err.message); }
+  }
+  const field = (type, placeholder, value, max) => {
+    const i = el("input"); i.type = type; i.placeholder = placeholder || "";
+    if (value !== undefined && value !== null) i.value = value;
+    if (max) i.maxLength = max;
+    return i;
+  };
+  const selectOf = (pairs, value) => {
+    const s = el("select");
+    for (const [v, label] of pairs) { const o = el("option", null, label); o.value = v; s.appendChild(o); }
+    if (value !== undefined) s.value = value;
+    return s;
+  };
+  function rowList(items, render) {
+    const ul = el("ul", "row-list");
+    if (!items.length) ul.appendChild(el("li", "muted", "None yet."));
+    for (const it of items) { const li = el("li"); render(li, it); ul.appendChild(li); }
+    return ul;
+  }
+
+  async function loadTeams() {
+    const box = $("teams");
+    let data;
+    try { data = await getJSON("/api/teams"); } catch (err) { box.replaceChildren(el("div", "muted", err.message)); return; }
+    if (!data) return;
+    box.replaceChildren();
+    const grid = el("div", "team-grid");
+    const ids = data.teams.filter((t) => !t.archived).map((t) => [t.id, t.name]);
+
+    if (data.is_admin) {
+      const c = el("div", "card");
+      const name = field("text", "Team name, e.g. Payments", "", 80);
+      const st = el("span", "muted");
+      const form = el("div", "inline-form");
+      form.append(name, button("Create team", "small primary", () => {
+        if (name.value.trim().length < 2) { st.textContent = "Name the team first."; return; }
+        teamPost("create", { name: name.value.trim() }, st);
+      }), st);
+      c.append(el("div", "item-title", "New team"), form);
+      grid.appendChild(c);
+
+      if (data.unowned_repos.length) {
+        const u = el("div", "card");
+        u.appendChild(el("div", "item-title", `Unowned repos (${data.unowned_repos.length})`));
+        u.appendChild(el("div", "muted", "Their findings are visible to admins only until a team owns them."));
+        const list = el("div", "unowned");
+        for (const r of data.unowned_repos) {
+          const l = el("label"); const cb = el("input"); cb.type = "checkbox"; cb.value = r;
+          l.append(cb, document.createTextNode(` ${r}`)); list.appendChild(l);
+        }
+        const team = selectOf(ids);
+        const st2 = el("span", "muted");
+        const row = el("div", "actions");
+        row.append(team, button("Assign selected", "small", () => {
+          const repos = [...list.querySelectorAll("input:checked")].map((x) => x.value);
+          if (!repos.length) { st2.textContent = "Tick at least one repo."; return; }
+          teamPost("assign", { team_id: team.value, repos }, st2);
+        }), st2);
+        u.append(list, row);
+        grid.appendChild(u);
+      }
+    }
+
+    if (!data.teams.length) grid.appendChild(el("div", "card muted", "You are not in any team yet."));
+    for (const t of data.teams) grid.appendChild(teamCard(t, data.is_admin));
+    box.appendChild(grid);
+  }
+
+  function teamCard(t, isAdmin) {
+    const card = el("div", "card");
+    const head = el("div", "team-head");
+    const title = el("div", "item-title");
+    title.append(el("h2", null, t.name), chip(t.id, "neutral"));
+    if (t.archived) title.appendChild(chip("archived", "warn"));
+    if (t.source === "config") title.appendChild(chip("from ownership.yml", "info"));
+    const stats = el("div", "muted", `${t.open} open · ${t.open_high} high+ · ${t.jira_open} Jira tickets open`);
+    head.append(title, stats);
+    card.appendChild(head);
+    const st = el("div", "muted");
+
+    const cols = el("div", "team-cols");
+
+    // Members
+    const mem = el("div");
+    mem.appendChild(el("h3", null, `Members (${t.members.length})`));
+    mem.appendChild(rowList(t.members, (li, m) => {
+      const who = el("span"); who.append(document.createTextNode(m.email + " "), chip(m.role, m.role === "lead" ? "info" : "neutral"));
+      li.appendChild(who);
+      if (t.can_manage && (isAdmin || m.role === "member")) {
+        li.appendChild(button("Remove", "small danger", () => teamPost("member", { team_id: t.id, email: m.email, remove: true }, st)));
+      }
+    }));
+    if (t.can_manage) {
+      const email = field("email", "name@company.com", "", 254);
+      const role = selectOf(isAdmin ? [["member", "member"], ["lead", "lead"]] : [["member", "member"]]);
+      const f = el("div", "inline-form");
+      f.append(email, role, button("Add", "small", () => teamPost("member", { team_id: t.id, email: email.value.trim(), role: role.value }, st)));
+      mem.appendChild(f);
+    }
+    cols.appendChild(mem);
+
+    // Owned repos and URLs
+    const own = el("div");
+    own.appendChild(el("h3", null, "Assigned repos & URLs"));
+    own.appendChild(rowList(t.assets, (li, a) => {
+      li.append(el("span", null, `${a.kind === "url" ? "🌐" : "📦"} ${a.value}`));
+      if (isAdmin) li.appendChild(button("Unassign", "small", () => teamPost("asset", { team_id: t.id, kind: a.kind, value: a.value, remove: true }, st)));
+    }));
+    if (isAdmin) {
+      const kind = selectOf([["repo", "repo"], ["url", "URL (DAST)"]]);
+      const val = field("text", "repo-name or https://app.example.com", "", 300);
+      const f = el("div", "inline-form");
+      f.append(kind, val, button("Assign", "small", () => teamPost("asset", { team_id: t.id, kind: kind.value, value: val.value.trim() }, st)));
+      own.appendChild(f);
+    }
+    const det = el("details");
+    det.appendChild(el("summary", "muted", `${t.repos.length} repos owned in total (assigned + rules + ownership.yml)`));
+    det.appendChild(rowList(t.repos, (li, r) => li.append(el("span", null, r.repo), el("span", "muted", r.source))));
+    own.appendChild(det);
+    cols.appendChild(own);
+
+    // Rules
+    if (isAdmin || t.rules.length) {
+      const ru = el("div");
+      ru.appendChild(el("h3", null, "Ownership rules"));
+      ru.appendChild(el("div", "muted", "New repos matching these are owned automatically from the next run."));
+      ru.appendChild(rowList(t.rules, (li, r) => {
+        li.append(el("span", null, `${r.kind.replace("_", " ")}: ${r.value}`));
+        if (isAdmin) li.appendChild(button("Remove", "small", () => teamPost("rule", { team_id: t.id, kind: r.kind, value: r.value, remove: true }, st)));
+      }));
+      if (isAdmin) {
+        const kind = selectOf([["topic", "GitHub topic"], ["name_prefix", "name starts with"], ["name_contains", "name contains"]]);
+        const val = field("text", "e.g. team-payments or pay-", "", 100);
+        const f = el("div", "inline-form");
+        f.append(kind, val, button("Add rule", "small", () => teamPost("rule", { team_id: t.id, kind: kind.value, value: val.value.trim() }, st)));
+        ru.appendChild(f);
+      }
+      cols.appendChild(ru);
+    }
+
+    // Notifications
+    const s = t.settings;
+    const no = el("div");
+    no.appendChild(el("h3", null, "Weekly report & Jira"));
+    const g = el("div", "settings-grid");
+    const emailCb = el("input"); emailCb.type = "checkbox"; emailCb.checked = s.email_digest;
+    const slack = field("url", s.slack ? `set (${s.slack_hint}); paste a new one to replace` : "https://hooks.slack.com/services/…", "", 300);
+    const jiraCb = el("input"); jiraCb.type = "checkbox"; jiraCb.checked = s.jira_enabled;
+    const proj = field("text", "Project key, e.g. SEC", s.jira_project, 20);
+    const itype = field("text", "Bug", s.jira_issue_type, 40);
+    const asg = field("email", "assignee e-mail (optional)", s.jira_assignee, 254);
+    const slaC = field("number", "", s.sla_days.critical); slaC.min = 1; slaC.max = 365;
+    const slaH = field("number", "", s.sla_days.high); slaH.min = 1; slaH.max = 365;
+    const canEdit = t.can_manage;
+    [emailCb, slack, jiraCb, proj, itype, asg, slaC, slaH].forEach((x) => { x.disabled = !canEdit; });
+    const pairs = [["E-mail every member", emailCb], ["Slack webhook", slack], ["Create Jira tickets", jiraCb],
+                   ["Jira project", proj], ["Issue type", itype], ["Assignee", asg],
+                   ["SLA critical (days)", slaC], ["SLA high (days)", slaH]];
+    for (const [label, input] of pairs) g.append(el("label", "muted", label), input);
+    no.appendChild(g);
+    if (canEdit) {
+      const save = button("Save", "small primary", () => {
+        const body = { team_id: t.id, email_digest: emailCb.checked, jira_enabled: jiraCb.checked,
+                       jira_project: proj.value.trim(), jira_issue_type: itype.value.trim() || "Bug",
+                       jira_assignee: asg.value.trim(), sla_days: { critical: +slaC.value, high: +slaH.value } };
+        if (slack.value.trim()) body.slack_webhook = slack.value.trim();
+        teamPost("settings", body, st);
+      });
+      const row = el("div", "actions"); row.appendChild(save);
+      if (s.slack) row.appendChild(button("Remove Slack", "small", () => teamPost("settings", { team_id: t.id, slack_webhook: "" }, st)));
+      no.appendChild(row);
+    }
+    no.appendChild(el("div", "muted", "Tickets: one per repo + rule, high and critical only; closed automatically when fixed; leads are reminded in Jira when past SLA."));
+    cols.appendChild(no);
+
+    card.appendChild(cols);
+    if (isAdmin) {
+      const adm = el("div", "actions");
+      const nm = field("text", "Rename", t.name, 80);
+      adm.append(nm, button("Rename", "small", () => teamPost("update", { team_id: t.id, name: nm.value.trim() }, st)),
+                 button(t.archived ? "Restore" : "Archive", "small danger", () => {
+                   if (t.archived || window.confirm(`Archive ${t.name}? Members lose access through this team.`)) {
+                     teamPost("update", { team_id: t.id, archived: !t.archived }, st);
+                   }
+                 }));
+      card.appendChild(adm);
+    }
+    card.appendChild(st);
+    return card;
+  }
+  loaders.teams = loadTeams;
 
   // ── Start ───────────────────────────────────────────────────────────────
   function setupPersonas() {

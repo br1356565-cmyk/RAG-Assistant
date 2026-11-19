@@ -546,3 +546,206 @@ create policy gates_deciders on review_gates for all to audit_app
   using (app_role() in ('team_lead','security_admin')) with check (app_role() in ('team_lead','security_admin'));
 drop policy if exists ingest_all on review_gates;
 create policy ingest_all on review_gates for all to audit_ingest using (true) with check (true);
+
+-- ── Dashboard-managed teams ────────────────────────────────────────────────
+-- Teams, members, owned repos/URLs and per-team delivery settings are managed in the web
+-- dashboard and take effect immediately: no YAML edit, no Terraform deploy. ownership.yml and
+-- Entra group ids still work as a starting point (source = 'config'); a team edited in the
+-- dashboard becomes source = 'dashboard' and the YAML no longer touches it.
+--
+-- Precedence for "whose repo is this": an explicit dashboard assignment (team_assets), then a
+-- dashboard rule (team_rules: topic / name prefix / name contains), then ownership.yml.
+-- Membership: team_members by e-mail (the sign-in token's e-mail/UPN), plus the legacy Entra
+-- group mapping on teams.entra_group_id.
+alter table teams add column if not exists source      text not null default 'config';
+alter table teams add column if not exists created_by  text;
+alter table teams add column if not exists created_at  timestamptz not null default now();
+alter table teams add column if not exists archived_at timestamptz;
+do $$ begin
+  alter table teams add constraint teams_id_format check (id ~ '^[a-z][a-z0-9_]{1,39}$');
+exception when duplicate_object then null; when check_violation then null; end $$;
+do $$ begin
+  alter table teams add constraint teams_source check (source in ('config','dashboard'));
+exception when duplicate_object then null; end $$;
+
+create table if not exists team_members (
+  team_id   text not null references teams(id) on delete cascade,
+  email     text not null check (email = lower(email) and email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' and length(email) <= 254),
+  role      text not null default 'member' check (role in ('member','lead')),
+  added_by  text not null,
+  added_at  timestamptz not null default now(),
+  primary key (team_id, email)
+);
+create index if not exists team_members_email on team_members (email);
+
+-- One owner per asset: assigning a repo or URL to a team moves it.
+create table if not exists team_assets (
+  kind      text not null check (kind in ('repo','url')),
+  value     text not null check (length(value) between 1 and 300),
+  team_id   text not null references teams(id) on delete cascade,
+  added_by  text not null,
+  added_at  timestamptz not null default now(),
+  primary key (kind, value),
+  check (kind <> 'repo' or value ~ '^[A-Za-z0-9._-]{1,100}$'),
+  check (kind <> 'url'  or value ~ '^https?://[^\s/$.?#][^\s]*$')
+);
+create index if not exists team_assets_team on team_assets (team_id);
+
+create table if not exists team_rules (
+  id        bigserial primary key,
+  team_id   text not null references teams(id) on delete cascade,
+  kind      text not null check (kind in ('topic','name_prefix','name_contains')),
+  value     text not null check (value = lower(value) and value ~ '^[a-z0-9._-]{1,100}$'),
+  added_by  text not null,
+  added_at  timestamptz not null default now(),
+  unique (kind, value)
+);
+
+-- Delivery: e-mail digest to every member, an optional Slack incoming webhook, optional Jira.
+create table if not exists team_settings (
+  team_id         text primary key references teams(id) on delete cascade,
+  email_digest    boolean not null default true,
+  slack_webhook   text check (slack_webhook is null or slack_webhook ~ '^https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+$'),
+  jira_enabled    boolean not null default false,
+  jira_project    text check (jira_project is null or jira_project ~ '^[A-Z][A-Z0-9_]{1,19}$'),
+  jira_issue_type text not null default 'Bug' check (length(jira_issue_type) between 1 and 40),
+  jira_assignee   text check (jira_assignee is null or jira_assignee ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$'),
+  sla_days        jsonb not null default '{"critical": 7, "high": 30}',
+  updated_by      text,
+  updated_at      timestamptz not null default now(),
+  check (not jira_enabled or jira_project is not null)
+);
+
+-- One Jira ticket per team + source + resource + rule (high and critical only). Written by
+-- the weekly delivery step (ingest role); teams read their own.
+create table if not exists jira_tickets (
+  group_key        text primary key,            -- team|source|resource|rule
+  team_id          text not null references teams(id) on delete cascade,
+  source           text not null,
+  resource         text not null,
+  rule             text not null,
+  severity         text not null,
+  issue_key        text not null,
+  status           text not null default 'open' check (status in ('open','closed')),
+  fingerprints     text[] not null default '{}',
+  created_at       timestamptz not null default now(),
+  closed_at        timestamptz,
+  last_followup_at timestamptz,
+  followups        int not null default 0
+);
+create index if not exists jira_tickets_team on jira_tickets (team_id, status);
+
+-- Every team change is recorded (who, what, when) for audit.
+create table if not exists team_changes (
+  id       bigserial primary key,
+  team_id  text,
+  actor    text not null,
+  action   text not null,
+  detail   jsonb not null default '{}',
+  at       timestamptz not null default now()
+);
+
+-- Sign-in looks up a user's memberships before any scope exists, so it goes through this
+-- function (owner rights; team_members is not FORCE'd so the owner can read it). It returns
+-- only the caller-supplied e-mail's rows.
+create or replace function memberships_for(p_email text) returns table (team_id text, team_name text, role text)
+language sql stable security definer set search_path = public as $$
+  select m.team_id, t.name, m.role from team_members m join teams t on t.id = m.team_id
+  where m.email = lower(p_email) and t.archived_at is null order by m.team_id
+$$;
+revoke all on function memberships_for(text) from public;
+grant execute on function memberships_for(text) to audit_app;
+
+-- RLS. Team, member, asset and rule rows are visible to the team (and admins); only admins
+-- create teams or move repos/URLs between teams. A lead manages their own team's members
+-- (members only; admins make leads) and its delivery settings.
+alter table teams         enable row level security;
+alter table repo_owners   enable row level security;
+alter table team_members  enable row level security;
+alter table team_assets   enable row level security;  alter table team_assets   force row level security;
+alter table team_rules    enable row level security;  alter table team_rules    force row level security;
+alter table team_settings enable row level security;  alter table team_settings force row level security;
+alter table jira_tickets  enable row level security;  alter table jira_tickets  force row level security;
+alter table team_changes  enable row level security;  alter table team_changes  force row level security;
+
+drop policy if exists teams_read on teams;
+create policy teams_read on teams for select to audit_app using (true);
+drop policy if exists teams_admin_insert on teams;
+create policy teams_admin_insert on teams for insert to audit_app with check (app_is_admin() and source = 'dashboard');
+drop policy if exists teams_admin_update on teams;
+create policy teams_admin_update on teams for update to audit_app using (app_is_admin()) with check (app_is_admin());
+
+drop policy if exists owners_read on repo_owners;
+create policy owners_read on repo_owners for select to audit_app using (true);
+drop policy if exists owners_admin_write on repo_owners;
+create policy owners_admin_write on repo_owners for insert to audit_app with check (app_is_admin());
+drop policy if exists owners_admin_update on repo_owners;
+create policy owners_admin_update on repo_owners for update to audit_app using (app_is_admin()) with check (app_is_admin());
+
+drop policy if exists members_read on team_members;
+create policy members_read on team_members for select to audit_app using (
+  app_is_admin() or team_id = any (app_team_ids()));
+drop policy if exists members_insert on team_members;
+create policy members_insert on team_members for insert to audit_app with check (
+  app_is_admin() or (team_id = any (app_team_ids()) and app_role() = 'team_lead' and role = 'member'));
+drop policy if exists members_update on team_members;
+create policy members_update on team_members for update to audit_app
+  using (app_is_admin()) with check (app_is_admin());
+drop policy if exists members_delete on team_members;
+create policy members_delete on team_members for delete to audit_app using (
+  app_is_admin() or (team_id = any (app_team_ids()) and app_role() = 'team_lead' and role = 'member'));
+
+drop policy if exists assets_read on team_assets;
+create policy assets_read on team_assets for select to audit_app using (app_is_admin() or team_id = any (app_team_ids()));
+drop policy if exists assets_admin on team_assets;
+create policy assets_admin on team_assets for all to audit_app using (app_is_admin()) with check (app_is_admin());
+
+drop policy if exists rules_read on team_rules;
+create policy rules_read on team_rules for select to audit_app using (app_is_admin() or team_id = any (app_team_ids()));
+drop policy if exists rules_admin on team_rules;
+create policy rules_admin on team_rules for all to audit_app using (app_is_admin()) with check (app_is_admin());
+
+drop policy if exists settings_read on team_settings;
+create policy settings_read on team_settings for select to audit_app using (app_is_admin() or team_id = any (app_team_ids()));
+drop policy if exists settings_write on team_settings;
+create policy settings_write on team_settings for insert to audit_app with check (
+  app_is_admin() or (team_id = any (app_team_ids()) and app_role() = 'team_lead'));
+drop policy if exists settings_update on team_settings;
+create policy settings_update on team_settings for update to audit_app
+  using (app_is_admin() or (team_id = any (app_team_ids()) and app_role() = 'team_lead'))
+  with check (app_is_admin() or (team_id = any (app_team_ids()) and app_role() = 'team_lead'));
+
+drop policy if exists jira_read on jira_tickets;
+create policy jira_read on jira_tickets for select to audit_app using (app_is_admin() or team_id = any (app_team_ids()));
+
+drop policy if exists changes_read on team_changes;
+create policy changes_read on team_changes for select to audit_app using (app_is_admin() or team_id = any (app_team_ids()));
+drop policy if exists changes_insert on team_changes;
+create policy changes_insert on team_changes for insert to audit_app with check (actor = app_user_id());
+
+-- Moving a repo/URL re-teams its open findings at once (admins only; column-limited grant).
+drop policy if exists findings_admin_reassign on findings;
+create policy findings_admin_reassign on findings for update to audit_app using (app_is_admin()) with check (app_is_admin());
+
+do $$
+declare t text;
+begin
+  foreach t in array array['teams','repo_owners','team_members','team_assets','team_rules','team_settings',
+                           'jira_tickets','team_changes'] loop
+    execute format('drop policy if exists ingest_all on %I', t);
+    execute format('create policy ingest_all on %I for all to audit_ingest using (true) with check (true)', t);
+  end loop;
+end $$;
+
+grant select, insert on teams to audit_app;
+grant update (name, archived_at, source, entra_group_id) on teams to audit_app;
+grant select, insert on repo_owners to audit_app;
+grant update (team_id, source, confidence, approved_by, updated_at) on repo_owners to audit_app;
+grant update (team_id) on findings to audit_app;
+grant select, insert, update, delete on team_members, team_assets, team_rules to audit_app;
+grant select, insert, update on team_settings to audit_app;
+grant select on jira_tickets to audit_app;
+grant select, insert on team_changes to audit_app;
+grant select, insert, update, delete on team_members, team_assets, team_rules, team_settings, jira_tickets,
+  team_changes to audit_ingest;
+grant usage on all sequences in schema public to audit_app, audit_ingest;

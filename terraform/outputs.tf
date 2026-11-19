@@ -31,6 +31,7 @@ output "secrets_to_populate" {
     github_private_key = "${aws_secretsmanager_secret.github_private_key.arn}  PEM file of the GitHub App"
     slack_webhook      = "${aws_secretsmanager_secret.slack_webhook.arn}  https://hooks.slack.com/services/..."
     fix_github_key     = local.agentcore && var.fix_agent_enabled ? "${aws_secretsmanager_secret.fix_github_private_key[0].arn}  PEM file of the fix-bot GitHub App (write access)" : "not used"
+    jira               = var.jira_enabled ? "${aws_secretsmanager_secret.jira[0].arn}  JSON: {\"base_url\": \"https://<site>.atlassian.net\", \"email\": \"...\", \"api_token\": \"...\"}" : "not used"
   }
 }
 
@@ -74,4 +75,15 @@ output "diagnostics_demo_instance_id" {
 
 output "dashboard_url" {
   value = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.agent.dashboard_name}"
+}
+
+output "scanning" {
+  description = "Org-wide SAST/DAST scan tasks and team reports"
+  value = {
+    sast          = var.sast_enabled ? "${aws_ecs_task_definition.scan["sast"].family} (logs: /ecs/${local.name}-sast)" : "off"
+    dast          = var.dast_enabled ? "${aws_ecs_task_definition.scan["dast"].family} (logs: /ecs/${local.name}-dast)" : "off"
+    collectors    = local.run_collectors
+    digest_sender = coalesce(var.digest_sender, "off (set digest_sender)")
+    dashboard_url = local.dashboard_url
+  }
 }
